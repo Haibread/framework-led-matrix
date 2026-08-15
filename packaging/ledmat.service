@@ -1,0 +1,20 @@
+[Unit]
+Description=Framework 16 LED Matrix panels
+Documentation=https://github.com/Haibread/framework-led-matrix
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/ledmat
+Environment=BRIGHTNESS=30
+Environment=LEFT_SCENE=pong
+Environment=RIGHT_SCENE=snake
+Environment=LOG_FILTER=info
+# The panels are cleared on SIGTERM; give that a moment to reach the modules.
+KillSignal=SIGTERM
+TimeoutStopSec=5
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

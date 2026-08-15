@@ -1,0 +1,157 @@
+//! Drives the two Framework 16 LED Matrix modules.
+//!
+//! Each module gets its own thread running a fixed-rate loop: step the scene,
+//! draw it into a 9x34 greyscale canvas, push the canvas over USB serial. The
+//! main task does nothing but wait for a signal and then stop the panels
+//! cleanly, so the LEDs never stay lit after the process exits.
+
+mod canvas;
+mod cli;
+mod device;
+mod font;
+mod runner;
+mod scene;
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use anyhow::{Context, Result};
+use clap::Parser;
+use tokio::task::JoinSet;
+use tracing::{error, info, warn};
+use tracing_subscriber::EnvFilter;
+
+use cli::Cli;
+use device::Panel;
+use device::serial::SerialMatrix;
+use device::terminal::TerminalMatrix;
+use scene::{AnyScene, SceneKind};
+
+/// Terminal columns the preview panels are drawn at.
+const LEFT_PREVIEW_COLUMN: usize = 3;
+const RIGHT_PREVIEW_COLUMN: usize = 27;
+
+/// Everything needed to bring one panel up.
+struct PanelSpec {
+    label: &'static str,
+    device: String,
+    scene: SceneKind,
+    preview_column: usize,
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let cli = Cli::parse();
+
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::new(&cli.log_filter))
+        .with_writer(std::io::stderr)
+        .init();
+
+    let specs = [
+        PanelSpec {
+            label: "left",
+            device: cli.left_device.clone(),
+            scene: cli.left_scene,
+            preview_column: LEFT_PREVIEW_COLUMN,
+        },
+        PanelSpec {
+            label: "right",
+            device: cli.right_device.clone(),
+            scene: cli.right_scene,
+            preview_column: RIGHT_PREVIEW_COLUMN,
+        },
+    ];
+
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let mut panels = JoinSet::new();
+
+    for (index, spec) in specs.into_iter().enumerate() {
+        // Offset the seed per panel, or both games play out identically.
+        let seed = cli.seed.map(|seed| seed.wrapping_add(index as u64));
+        let Some(scene) = AnyScene::new(spec.scene, seed) else {
+            info!(panel = spec.label, "panel disabled");
+            continue;
+        };
+
+        let matrix = open_panel(&spec, cli.simulate)?;
+        let stop = Arc::clone(&shutdown);
+        let (label, fps, brightness) = (spec.label, cli.fps, cli.brightness);
+
+        // The serial writes are blocking, so each panel owns a blocking thread
+        // rather than pretending to be async.
+        panels.spawn_blocking(move || {
+            runner::run_panel(label, matrix, scene, fps, brightness, &stop)
+        });
+    }
+
+    if panels.is_empty() {
+        warn!("both panels are off, nothing to do");
+        return Ok(());
+    }
+
+    tokio::select! {
+        () = shutdown_signal() => info!("shutdown signal received"),
+        Some(finished) = panels.join_next() => report(finished),
+    }
+
+    shutdown.store(true, Ordering::Relaxed);
+    while let Some(finished) = panels.join_next().await {
+        report(finished);
+    }
+
+    Ok(())
+}
+
+/// Opens one panel, on hardware or in the terminal.
+fn open_panel(spec: &PanelSpec, simulate: bool) -> Result<Panel> {
+    if simulate {
+        return Ok(Panel::Terminal(TerminalMatrix::new(
+            spec.label,
+            spec.preview_column,
+        )));
+    }
+
+    let matrix = SerialMatrix::open(&spec.device).with_context(|| {
+        format!(
+            "opening the {} panel — is the udev rule installed? \
+             Try --simulate to run without hardware",
+            spec.label
+        )
+    })?;
+    Ok(Panel::Serial(matrix))
+}
+
+/// Logs how a panel thread ended.
+fn report(finished: Result<Result<()>, tokio::task::JoinError>) {
+    match finished {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => error!(?error, "panel failed"),
+        Err(error) => error!(?error, "panel thread crashed"),
+    }
+}
+
+/// Completes on `SIGTERM` or `SIGINT`.
+async fn shutdown_signal() {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut interrupt = match signal(SignalKind::interrupt()) {
+        Ok(handler) => handler,
+        Err(error) => {
+            error!(?error, "cannot listen for SIGINT");
+            return;
+        }
+    };
+    let mut terminate = match signal(SignalKind::terminate()) {
+        Ok(handler) => handler,
+        Err(error) => {
+            error!(?error, "cannot listen for SIGTERM");
+            return;
+        }
+    };
+
+    tokio::select! {
+        _ = interrupt.recv() => {},
+        _ = terminate.recv() => {},
+    }
+}

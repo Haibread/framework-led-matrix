@@ -1,0 +1,14 @@
+extends: default
+
+rules:
+  # No `---` opening a file.
+  document-start:
+    present: false
+  # Block style only. `non-empty` still allows `{}` / `[]`.
+  braces:
+    forbid: non-empty
+  brackets:
+    forbid: non-empty
+  # Disable rather than tune: pinned hook revisions and long lint directives
+  # blow past any sensible limit on a single line.
+  line-length: disable
