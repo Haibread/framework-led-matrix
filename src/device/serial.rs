@@ -56,7 +56,7 @@ impl SerialMatrix {
         info!(device = path, "opened LED matrix");
         let mut matrix = Self {
             port,
-            frame: Vec::with_capacity(frame_len()),
+            frame: Vec::with_capacity(MAX_COMMAND_LEN),
         };
 
         // A sleeping module stops draining its USB buffer, so the first frames
@@ -100,12 +100,21 @@ impl Matrix for SerialMatrix {
     }
 
     fn draw(&mut self, canvas: &Canvas) -> Result<()> {
-        self.frame.clear();
-        encode_frame(canvas, &mut self.frame);
-        self.port
-            .write_all(&self.frame)
-            .context("writing frame to the module")?;
-        Ok(())
+        // One write per command, never a batched frame. The firmware reads into
+        // a 64-byte buffer and parses exactly one command per read, so a single
+        // 345-byte write of the whole frame gets its first column parsed and
+        // everything after it — including the commit — silently dropped. The
+        // panel then stays dark while every write still reports success.
+        for x in 0..canvas::WIDTH {
+            self.frame.clear();
+            encode_column(canvas, x, &mut self.frame);
+            self.port
+                .write_all(&self.frame)
+                .with_context(|| format!("staging column {x}"))?;
+        }
+
+        self.send(CMD_COMMIT_COLUMNS, &[])
+            .context("writing frame to the module")
     }
 
     fn clear(&mut self) -> Result<()> {
@@ -114,64 +123,64 @@ impl Matrix for SerialMatrix {
     }
 }
 
-/// Length of one encoded frame: nine staged columns plus the commit.
-fn frame_len() -> usize {
-    let column = MAGIC.len() + 2 + ROWS;
-    let commit = MAGIC.len() + 1;
-    column * 9 + commit
-}
+/// Length of the longest command sent to the module: one staged column.
+const MAX_COMMAND_LEN: usize = MAGIC.len() + 2 + ROWS;
 
-/// Serialises a canvas as staged columns followed by a commit.
-fn encode_frame(canvas: &Canvas, out: &mut Vec<u8>) {
-    for x in 0..canvas::WIDTH {
-        out.extend_from_slice(&MAGIC);
-        out.push(CMD_STAGE_COLUMN);
-        // The column index is `0..9`, so this conversion cannot fail.
-        out.push(u8::try_from(x).unwrap_or(0));
-        out.extend_from_slice(&canvas.column(x));
-    }
+/// Size of the firmware's serial read buffer.
+///
+/// It parses one command per read, so a command longer than this could never be
+/// received whole.
+const FIRMWARE_READ_BUFFER: usize = 64;
+
+const _: () = assert!(MAX_COMMAND_LEN <= FIRMWARE_READ_BUFFER);
+
+/// Serialises column `x` of the canvas as one `StageGreyColumn` command.
+fn encode_column(canvas: &Canvas, x: i32, out: &mut Vec<u8>) {
     out.extend_from_slice(&MAGIC);
-    out.push(CMD_COMMIT_COLUMNS);
+    out.push(CMD_STAGE_COLUMN);
+    // The column index is `0..9`, so this conversion cannot fail.
+    out.push(u8::try_from(x).unwrap_or(0));
+    out.extend_from_slice(&canvas.column(x));
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        CMD_BRIGHTNESS, CMD_COMMIT_COLUMNS, CMD_SLEEP, CMD_STAGE_COLUMN, MAGIC, ROWS,
-        command_frame, encode_frame, frame_len,
+        CMD_BRIGHTNESS, CMD_SLEEP, CMD_STAGE_COLUMN, FIRMWARE_READ_BUFFER, MAGIC, MAX_COMMAND_LEN,
+        ROWS, command_frame, encode_column,
     };
     use crate::canvas::Canvas;
 
-    fn encode(canvas: &Canvas) -> Vec<u8> {
+    fn encode(canvas: &Canvas, x: i32) -> Vec<u8> {
         let mut out = Vec::new();
-        encode_frame(canvas, &mut out);
+        encode_column(canvas, x, &mut out);
         out
     }
 
     #[test]
-    fn a_frame_has_the_advertised_length() {
-        assert_eq!(encode(&Canvas::new()).len(), frame_len());
+    fn a_column_command_fits_in_one_firmware_read() {
+        // This is the whole reason a frame is nine writes instead of one: the
+        // firmware parses a single command per 64-byte read, so anything longer
+        // than its buffer, or batched behind another command, is dropped. The
+        // budget itself is checked at compile time next to the constants.
+        let length = encode(&Canvas::new(), 0).len();
+        assert_eq!(length, MAX_COMMAND_LEN);
+        assert!(length < FIRMWARE_READ_BUFFER, "{length} bytes will not fit");
     }
 
     #[test]
-    fn columns_are_staged_in_order_then_committed() {
-        let frame = encode(&Canvas::new());
-        let stride = MAGIC.len() + 2 + ROWS;
-
+    fn a_column_announces_its_index_after_the_magic_prefix() {
         for x in 0..9 {
-            let header = &frame[x * stride..x * stride + 4];
-            assert_eq!(header[0], MAGIC[0]);
-            assert_eq!(header[1], MAGIC[1]);
-            assert_eq!(header[2], CMD_STAGE_COLUMN);
+            let column = encode(&Canvas::new(), x);
+            assert_eq!(column[0], MAGIC[0]);
+            assert_eq!(column[1], MAGIC[1]);
+            assert_eq!(column[2], CMD_STAGE_COLUMN);
             assert_eq!(
-                header[3],
+                column[3],
                 u8::try_from(x).unwrap(),
                 "column {x} announced the wrong index"
             );
         }
-
-        let commit = &frame[frame.len() - 3..];
-        assert_eq!(commit, [MAGIC[0], MAGIC[1], CMD_COMMIT_COLUMNS]);
     }
 
     #[test]
@@ -180,12 +189,15 @@ mod tests {
         canvas.set(0, 0, 0xAA);
         canvas.set(8, 33, 0xBB);
 
-        let frame = encode(&canvas);
-        let stride = MAGIC.len() + 2 + ROWS;
         let payload = MAGIC.len() + 2;
+        assert_eq!(encode(&canvas, 0)[payload], 0xAA, "top-left pixel");
+        assert_eq!(encode(&canvas, 8)[payload + 33], 0xBB, "bottom-right pixel");
+    }
 
-        assert_eq!(frame[payload], 0xAA, "top-left pixel");
-        assert_eq!(frame[8 * stride + payload + 33], 0xBB, "bottom-right pixel");
+    #[test]
+    fn a_column_carries_one_byte_per_row() {
+        let column = encode(&Canvas::new(), 4);
+        assert_eq!(column.len() - MAGIC.len() - 2, ROWS);
     }
 
     #[test]
@@ -208,10 +220,10 @@ mod tests {
     #[test]
     fn encoding_reuses_the_buffer_without_appending() {
         let mut out = Vec::new();
-        encode_frame(&Canvas::new(), &mut out);
+        encode_column(&Canvas::new(), 0, &mut out);
         let first = out.len();
         out.clear();
-        encode_frame(&Canvas::new(), &mut out);
+        encode_column(&Canvas::new(), 0, &mut out);
         assert_eq!(out.len(), first);
     }
 }
