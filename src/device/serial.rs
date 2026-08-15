@@ -8,7 +8,7 @@ use std::io::Write;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::canvas::{self, Canvas, ROWS};
 use crate::device::Matrix;
@@ -18,6 +18,8 @@ const MAGIC: [u8; 2] = [0x32, 0xAC];
 
 /// Set the global brightness.
 const CMD_BRIGHTNESS: u8 = 0x00;
+/// Put the module to sleep, or wake it up.
+const CMD_SLEEP: u8 = 0x03;
 /// Stage one greyscale column in the module's back buffer.
 const CMD_STAGE_COLUMN: u8 = 0x07;
 /// Commit every staged column to the panel.
@@ -52,23 +54,43 @@ impl SerialMatrix {
             .with_context(|| format!("opening LED matrix at {path}"))?;
 
         info!(device = path, "opened LED matrix");
-        Ok(Self {
+        let mut matrix = Self {
             port,
             frame: Vec::with_capacity(frame_len()),
-        })
+        };
+
+        // A sleeping module stops draining its USB buffer, so the first frames
+        // sent to it time out instead of being drawn. Waking it up front turns
+        // that into a single command that may fail rather than a dead panel.
+        if let Err(error) = matrix.wake() {
+            warn!(device = path, ?error, "could not wake the module");
+        }
+
+        Ok(matrix)
     }
 
-    /// Sends a command with no arguments beyond its id.
+    /// Tells the module to wake up.
+    fn wake(&mut self) -> Result<()> {
+        debug!("waking the module");
+        self.send(CMD_SLEEP, &[0])
+    }
+
+    /// Sends a command with its arguments.
     fn send(&mut self, command: u8, args: &[u8]) -> Result<()> {
-        let mut message = Vec::with_capacity(MAGIC.len() + 1 + args.len());
-        message.extend_from_slice(&MAGIC);
-        message.push(command);
-        message.extend_from_slice(args);
         self.port
-            .write_all(&message)
+            .write_all(&command_frame(command, args))
             .with_context(|| format!("sending command {command:#04x}"))?;
         Ok(())
     }
+}
+
+/// Builds one command message.
+fn command_frame(command: u8, args: &[u8]) -> Vec<u8> {
+    let mut message = Vec::with_capacity(MAGIC.len() + 1 + args.len());
+    message.extend_from_slice(&MAGIC);
+    message.push(command);
+    message.extend_from_slice(args);
+    message
 }
 
 impl Matrix for SerialMatrix {
@@ -114,7 +136,10 @@ fn encode_frame(canvas: &Canvas, out: &mut Vec<u8>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{CMD_COMMIT_COLUMNS, CMD_STAGE_COLUMN, MAGIC, ROWS, encode_frame, frame_len};
+    use super::{
+        CMD_BRIGHTNESS, CMD_COMMIT_COLUMNS, CMD_SLEEP, CMD_STAGE_COLUMN, MAGIC, ROWS,
+        command_frame, encode_frame, frame_len,
+    };
     use crate::canvas::Canvas;
 
     fn encode(canvas: &Canvas) -> Vec<u8> {
@@ -161,6 +186,23 @@ mod tests {
 
         assert_eq!(frame[payload], 0xAA, "top-left pixel");
         assert_eq!(frame[8 * stride + payload + 33], 0xBB, "bottom-right pixel");
+    }
+
+    #[test]
+    fn a_command_carries_the_magic_prefix_then_its_arguments() {
+        assert_eq!(
+            command_frame(CMD_BRIGHTNESS, &[40]),
+            vec![MAGIC[0], MAGIC[1], CMD_BRIGHTNESS, 40]
+        );
+    }
+
+    #[test]
+    fn waking_the_module_is_sleep_with_a_zero() {
+        // `0` is awake: the argument says whether to sleep, not whether to wake.
+        assert_eq!(
+            command_frame(CMD_SLEEP, &[0]),
+            vec![MAGIC[0], MAGIC[1], 0x03, 0]
+        );
     }
 
     #[test]
