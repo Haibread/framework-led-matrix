@@ -1,8 +1,14 @@
 # Framework 16 LED Matrix input modules (VID 32ac, PID 0020).
 #
 # Install with:
-#   sudo cp packaging/99-framework-led-matrix.rules /etc/udev/rules.d/
+#   sudo cp packaging/60-framework-led-matrix.rules /etc/udev/rules.d/
 #   sudo udevadm control --reload && sudo udevadm trigger
+#
+# The 60- prefix is load-bearing: do not renumber this file above 73.
+# /usr/lib/udev/rules.d/73-seat-late.rules is what turns the uaccess tag into an
+# ACL, and udev runs rule files in lexical order, so a tag set by a 99- file is
+# set after the only rule that reads it. The symptom is a working symlink with
+# no permission behind it.
 #
 # 1. Grant the logged-in user access to the device nodes.
 #

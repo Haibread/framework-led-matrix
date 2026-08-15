@@ -38,11 +38,17 @@ a normal user cannot open them. The shipped udev rule fixes that and gives each
 module a stable name:
 
 ```bash
-sudo cp packaging/99-framework-led-matrix.rules /etc/udev/rules.d/
+sudo cp packaging/60-framework-led-matrix.rules /etc/udev/rules.d/
 sudo udevadm control --reload && sudo udevadm trigger
 ```
 
-You should then have `/dev/led-matrix-left` and `/dev/led-matrix-right`.
+You should then have `/dev/led-matrix-left` and `/dev/led-matrix-right`, both
+writable by the user of the active session.
+
+The `60-` prefix matters. `73-seat-late.rules` is what turns the `uaccess` tag
+into an ACL, and udev runs rule files in lexical order, so a `99-` file would
+set the tag after the only rule that reads it — you would get the symlinks with
+no permission behind them.
 
 Both modules report the **same** USB serial number, so the rule tells them apart
 by which port they are plugged into. Those port ids are machine-specific: if the
