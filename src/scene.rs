@@ -13,6 +13,7 @@ use rand::SeedableRng;
 use rand::rngs::StdRng;
 
 use crate::canvas::Canvas;
+use crate::device::ColorMode;
 use pong::Pong;
 use snake::Snake;
 
@@ -38,6 +39,22 @@ pub enum SceneKind {
     Snake,
     /// Nothing; the panel stays dark and is left alone.
     Off,
+}
+
+impl SceneKind {
+    /// The colour mode this scene is built for.
+    ///
+    /// Games pick motion over shading: greyscale costs ten commands a frame and
+    /// the module only drains about sixty a second, so shading buys a 6 fps
+    /// picture where black and white gives thirty. A widget that changes once a
+    /// second has no such problem and should keep its shading.
+    #[must_use]
+    pub fn preferred_color_mode(self) -> ColorMode {
+        match self {
+            Self::Pong | Self::Snake => ColorMode::Bw,
+            Self::Off => ColorMode::Greyscale,
+        }
+    }
 }
 
 impl fmt::Display for SceneKind {
@@ -70,12 +87,15 @@ pub enum AnyScene {
 impl AnyScene {
     /// Builds the scene for `kind`, or `None` for [`SceneKind::Off`].
     ///
-    /// `seed` makes a run reproducible; `None` seeds from the OS.
+    /// `seed` makes a run reproducible; `None` seeds from the OS. `mode` is the
+    /// mode the panel will actually run in, which the scenes draw differently
+    /// for: shading that a black-and-white panel would flatten is wasted, and
+    /// worse, misleading.
     #[must_use]
-    pub fn new(kind: SceneKind, seed: Option<u64>) -> Option<Self> {
+    pub fn new(kind: SceneKind, seed: Option<u64>, mode: ColorMode) -> Option<Self> {
         match kind {
-            SceneKind::Pong => Some(Self::Pong(Pong::new(seed))),
-            SceneKind::Snake => Some(Self::Snake(Snake::new(seed))),
+            SceneKind::Pong => Some(Self::Pong(Pong::new(seed, mode))),
+            SceneKind::Snake => Some(Self::Snake(Snake::new(seed, mode))),
             SceneKind::Off => None,
         }
     }
@@ -114,15 +134,23 @@ pub(crate) fn rng_from(seed: Option<u64>) -> StdRng {
 
 #[cfg(test)]
 mod tests {
-    use super::{AnyScene, Scene, SceneKind};
+    use super::{AnyScene, ColorMode, Scene, SceneKind};
     use crate::canvas::Canvas;
     use std::time::Duration;
 
     #[test]
     fn off_builds_no_scene() {
-        assert!(AnyScene::new(SceneKind::Off, Some(1)).is_none());
-        assert!(AnyScene::new(SceneKind::Pong, Some(1)).is_some());
-        assert!(AnyScene::new(SceneKind::Snake, Some(1)).is_some());
+        assert!(AnyScene::new(SceneKind::Off, Some(1), ColorMode::Bw).is_none());
+        assert!(AnyScene::new(SceneKind::Pong, Some(1), ColorMode::Bw).is_some());
+        assert!(AnyScene::new(SceneKind::Snake, Some(1), ColorMode::Bw).is_some());
+    }
+
+    #[test]
+    fn the_games_ask_for_black_and_white() {
+        // Not a colour preference: greyscale costs ten commands a frame against
+        // a module that drains sixty a second, so shading would buy 6 fps.
+        assert_eq!(SceneKind::Pong.preferred_color_mode(), ColorMode::Bw);
+        assert_eq!(SceneKind::Snake.preferred_color_mode(), ColorMode::Bw);
     }
 
     #[test]
@@ -135,7 +163,7 @@ mod tests {
     #[test]
     fn every_scene_eventually_lights_a_pixel() {
         for kind in [SceneKind::Pong, SceneKind::Snake] {
-            let mut scene = AnyScene::new(kind, Some(7)).expect("scene");
+            let mut scene = AnyScene::new(kind, Some(7), ColorMode::Bw).expect("scene");
             let mut canvas = Canvas::new();
 
             for _ in 0..120 {

@@ -9,6 +9,42 @@ use crate::scene::SceneKind;
 const DEFAULT_LEFT_DEVICE: &str = "/dev/led-matrix-left";
 const DEFAULT_RIGHT_DEVICE: &str = "/dev/led-matrix-right";
 
+/// The colour mode asked for on the command line.
+///
+/// Distinct from [`ColorMode`] because "whatever this scene wants" is a valid
+/// answer here and not a mode the device could be handed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum ColorModeChoice {
+    /// Use each scene's own preference.
+    Auto,
+    /// Force per-LED brightness everywhere.
+    Greyscale,
+    /// Force one bit per LED everywhere.
+    Bw,
+}
+
+impl ColorModeChoice {
+    /// Resolves the choice against what a scene would like.
+    #[must_use]
+    pub fn resolve(self, preferred: ColorMode) -> ColorMode {
+        match self {
+            Self::Auto => preferred,
+            Self::Greyscale => ColorMode::Greyscale,
+            Self::Bw => ColorMode::Bw,
+        }
+    }
+}
+
+impl std::fmt::Display for ColorModeChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Auto => "auto",
+            Self::Greyscale => "greyscale",
+            Self::Bw => "bw",
+        })
+    }
+}
+
 /// Drive the Framework 16 LED Matrix modules.
 #[derive(Debug, Parser)]
 #[command(version, about, long_about = None)]
@@ -41,11 +77,12 @@ pub struct Cli {
 
     /// How frames are pushed to the modules
     ///
+    /// `auto` lets each scene choose: games take `bw`, widgets take `greyscale`.
     /// `greyscale` gives per-LED brightness but costs ten commands a frame,
     /// which the module's command rate caps at about 6 fps. `bw` is one command
     /// a frame, so roughly six times smoother, with no shading.
-    #[arg(long, env = "COLOR_MODE", default_value_t = ColorMode::Greyscale)]
-    pub color_mode: ColorMode,
+    #[arg(long, env = "COLOR_MODE", default_value_t = ColorModeChoice::Auto)]
+    pub color_mode: ColorModeChoice,
 
     /// Render to the terminal instead of the modules
     ///
@@ -67,7 +104,8 @@ pub struct Cli {
 
 #[cfg(test)]
 mod tests {
-    use super::Cli;
+    use super::{Cli, ColorModeChoice};
+    use crate::device::ColorMode;
     use crate::scene::SceneKind;
     use clap::{CommandFactory, Parser};
 
@@ -96,6 +134,32 @@ mod tests {
     #[test]
     fn an_unknown_scene_is_rejected() {
         assert!(Cli::try_parse_from(["ledmat", "--left-scene", "tetris"]).is_err());
+    }
+
+    #[test]
+    fn auto_defers_to_the_scene_while_the_others_override_it() {
+        assert_eq!(
+            ColorModeChoice::Auto.resolve(ColorMode::Bw),
+            ColorMode::Bw,
+            "auto ignored the scene"
+        );
+        assert_eq!(
+            ColorModeChoice::Greyscale.resolve(ColorMode::Bw),
+            ColorMode::Greyscale,
+            "the flag failed to override the scene"
+        );
+        assert_eq!(
+            ColorModeChoice::Bw.resolve(ColorMode::Greyscale),
+            ColorMode::Bw
+        );
+    }
+
+    #[test]
+    fn the_colour_mode_defaults_to_auto() {
+        assert_eq!(
+            Cli::parse_from(["ledmat"]).color_mode,
+            ColorModeChoice::Auto
+        );
     }
 
     #[test]

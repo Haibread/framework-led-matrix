@@ -8,6 +8,10 @@ USB serial device. `ledmat` renders every frame on the host and pushes raw
 pixels, so a scene can be anything you can draw — the firmware's built-in
 patterns are not involved.
 
+Colour mode is a property of the scene, not a global setting: a game wants
+motion and takes black and white, while a widget that changes once a second can
+afford the shading. `--color-mode` overrides that per run.
+
 Two scenes ship today, both playing on their own:
 
 - **pong** — two robot paddles with capped speed, a reaction delay and a fresh
@@ -92,7 +96,7 @@ Every option can be set as a flag or an environment variable. Flags win.
 | `--right-scene` | `RIGHT_SCENE` | `snake` | `pong`, `snake` or `off` |
 | `--brightness` | `BRIGHTNESS` | `30` | 0 to 255; the modules sit under your hands, past ~80 is a desk lamp |
 | `--fps` | `FPS` | `30` | 1 to 60 |
-| `--color-mode` | `COLOR_MODE` | `greyscale` | `greyscale` (shading, ~6 fps) or `bw` (no shading, ~6x faster) |
+| `--color-mode` | `COLOR_MODE` | `auto` | `auto` (per scene), `greyscale` (shading, ~6 fps) or `bw` (no shading, ~30 fps) |
 | `--simulate` | `SIMULATE` | `false` | Draw in the terminal instead of on the modules |
 | `--seed` | `SEED` | — | Seed the scenes for a reproducible run |
 | `--log-filter` | `LOG_FILTER` | `info` | `tracing` filter directive |
@@ -141,7 +145,9 @@ covers the rest, and the mocked `Matrix` trait covers the render loop.
 
 1. Implement `Scene` (`name`, `update(delta)`, `render(canvas)`) in
    `src/scene/<name>.rs`. It gets a cleared canvas and owns nothing else.
-2. Add it to `SceneKind` and `AnyScene` in `src/scene.rs`.
+2. Add it to `SceneKind` and `AnyScene` in `src/scene.rs`, and give it a colour
+   mode in `SceneKind::preferred_color_mode`. Anything that changes more than a
+   few times a second wants `Bw`.
 
 That is the whole contract — no serial, no timing, no frame budget to think
 about.

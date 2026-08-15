@@ -14,6 +14,7 @@ use rand::RngExt;
 use rand::rngs::StdRng;
 
 use crate::canvas::{self, Canvas, PIXELS};
+use crate::device::ColorMode;
 use crate::scene::{Scene, rng_from};
 
 /// Time between two moves. Slow enough to follow with your eyes.
@@ -27,6 +28,10 @@ const MAX_STEP: f32 = 0.1;
 const STARVATION_LIMIT: u32 = 900;
 
 const HEAD_LEVEL: u8 = 255;
+/// Blink rates used in black and white, where brightness cannot be used to tell
+/// things apart. Different rates so the head and the food never look alike.
+const HEAD_BLINK_HZ: f32 = 7.0;
+const FOOD_BLINK_HZ: f32 = 3.0;
 const BODY_BRIGHTEST: u32 = 190;
 const BODY_DIMMEST: u32 = 45;
 
@@ -84,6 +89,7 @@ enum Phase {
 
 /// A self-playing game of Snake.
 pub struct Snake {
+    mode: ColorMode,
     rng: StdRng,
     /// The snake, head first.
     body: VecDeque<Cell>,
@@ -100,8 +106,9 @@ pub struct Snake {
 impl Snake {
     /// Starts a game. `seed` makes the run reproducible.
     #[must_use]
-    pub fn new(seed: Option<u64>) -> Self {
+    pub fn new(seed: Option<u64>, mode: ColorMode) -> Self {
         let mut snake = Self {
+            mode,
             rng: rng_from(seed),
             body: VecDeque::new(),
             occupied: [false; PIXELS],
@@ -373,20 +380,42 @@ impl Scene for Snake {
             return;
         }
 
-        // A slow pulse so the food reads differently from the body.
-        let pulse = 0.45f32.mul_add((self.elapsed * 6.0).sin(), 0.55);
-        canvas.set_max(self.food.x, self.food.y, canvas::level(pulse));
+        // The food has to read differently from the body. Greyscale can pulse
+        // it; black and white only has on and off, so it blinks outright.
+        let food = match self.mode {
+            ColorMode::Greyscale => {
+                canvas::level(0.45f32.mul_add((self.elapsed * 6.0).sin(), 0.55))
+            }
+            ColorMode::Bw if blinking(self.elapsed, FOOD_BLINK_HZ) => u8::MAX,
+            ColorMode::Bw => 0,
+        };
+        canvas.set_max(self.food.x, self.food.y, food);
+
+        // Same problem for the head. Greyscale separates it from the body by
+        // brightness; thresholding flattens that away, leaving one uniform worm
+        // whose direction you can only infer by watching it move, so in black
+        // and white the head blinks instead.
+        let head = match self.mode {
+            ColorMode::Greyscale => HEAD_LEVEL,
+            ColorMode::Bw if blinking(self.elapsed, HEAD_BLINK_HZ) => HEAD_LEVEL,
+            ColorMode::Bw => 0,
+        };
 
         let length = self.body.len();
         for (index, cell) in self.body.iter().enumerate() {
             let level = if index == 0 {
-                HEAD_LEVEL
+                head
             } else {
                 body_level(index, length)
             };
             canvas.set_max(cell.x, cell.y, level);
         }
     }
+}
+
+/// Whether a thing blinking at `hz` is currently lit.
+fn blinking(elapsed: f32, hz: f32) -> bool {
+    canvas::floor_pixel(elapsed * hz) % 2 == 0
 }
 
 /// Maps a cell to its index in the occupancy grid.
@@ -472,6 +501,7 @@ fn body_level(index: usize, length: usize) -> u8 {
 mod tests {
     use super::{Cell, Direction, PIXELS, Phase, Snake, body_level, search, slot};
     use crate::canvas::{self, Canvas};
+    use crate::device::ColorMode;
     use crate::scene::Scene;
     use std::time::Duration;
 
@@ -528,7 +558,7 @@ mod tests {
 
     #[test]
     fn a_new_game_starts_alive_with_food_off_the_body() {
-        let snake = Snake::new(Some(1));
+        let snake = Snake::new(Some(1), ColorMode::Bw);
         assert_eq!(snake.phase, Phase::Playing);
         assert_eq!(snake.body.len(), 3);
         assert!(!snake.body.contains(&snake.food));
@@ -536,7 +566,7 @@ mod tests {
 
     #[test]
     fn the_body_and_the_occupancy_grid_never_disagree() {
-        let mut snake = Snake::new(Some(4));
+        let mut snake = Snake::new(Some(4), ColorMode::Bw);
         for _ in 0..1_500 {
             snake.step();
             if snake.phase != Phase::Playing {
@@ -553,7 +583,7 @@ mod tests {
 
     #[test]
     fn the_snake_never_overlaps_itself() {
-        let mut snake = Snake::new(Some(9));
+        let mut snake = Snake::new(Some(9), ColorMode::Bw);
         for _ in 0..1_500 {
             snake.step();
             if snake.phase != Phase::Playing {
@@ -573,7 +603,7 @@ mod tests {
         // Naive food-chasing bots trap themselves within a few dozen moves;
         // this is the regression test for the tail-reachability check.
         for seed in [1u64, 2, 3, 5, 8] {
-            let mut snake = Snake::new(Some(seed));
+            let mut snake = Snake::new(Some(seed), ColorMode::Bw);
             for step in 0..1_200 {
                 snake.step();
                 assert_eq!(
@@ -592,7 +622,7 @@ mod tests {
 
     #[test]
     fn a_boxed_in_snake_dies_rather_than_walking_through_itself() {
-        let mut snake = Snake::new(Some(1));
+        let mut snake = Snake::new(Some(1), ColorMode::Bw);
         // Wall the head in on all four sides.
         snake.occupied = [true; PIXELS];
         snake.step();
@@ -601,7 +631,7 @@ mod tests {
 
     #[test]
     fn death_restarts_the_game() {
-        let mut snake = Snake::new(Some(1));
+        let mut snake = Snake::new(Some(1), ColorMode::Bw);
         snake.die();
         assert!(matches!(snake.phase, Phase::Dying(_)));
 
@@ -614,7 +644,7 @@ mod tests {
 
     #[test]
     fn the_head_is_the_brightest_pixel() {
-        let mut snake = Snake::new(Some(2));
+        let mut snake = Snake::new(Some(2), ColorMode::Bw);
         for _ in 0..40 {
             snake.step();
         }
@@ -631,6 +661,35 @@ mod tests {
             );
             assert!(canvas.get(cell.x, cell.y) > 0, "body segment unlit");
         }
+    }
+
+    #[test]
+    fn the_head_blinks_in_black_and_white_but_not_in_greyscale() {
+        // Thresholding flattens the head-to-tail gradient into one uniform worm.
+        // Blinking the head is what puts back the "which end is which" that
+        // brightness was carrying.
+        for (mode, should_blink) in [(ColorMode::Bw, true), (ColorMode::Greyscale, false)] {
+            let mut snake = Snake::new(Some(2), mode);
+            let head = snake.head();
+
+            let mut seen_dark = false;
+            for _ in 0..40 {
+                snake.elapsed += 0.05;
+                let mut canvas = Canvas::new();
+                snake.render(&mut canvas);
+                if canvas.get(head.x, head.y) == 0 {
+                    seen_dark = true;
+                }
+            }
+            assert_eq!(seen_dark, should_blink, "wrong head behaviour in {mode}");
+        }
+    }
+
+    #[test]
+    fn blinking_alternates_at_the_requested_rate() {
+        assert!(super::blinking(0.0, 4.0));
+        assert!(!super::blinking(0.30, 4.0), "should be dark a quarter in");
+        assert!(super::blinking(0.55, 4.0), "should be lit again");
     }
 
     #[test]

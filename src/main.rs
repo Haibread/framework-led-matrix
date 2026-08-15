@@ -69,12 +69,13 @@ async fn main() -> Result<()> {
     for (index, spec) in specs.into_iter().enumerate() {
         // Offset the seed per panel, or both games play out identically.
         let seed = cli.seed.map(|seed| seed.wrapping_add(index as u64));
-        let Some(scene) = AnyScene::new(spec.scene, seed) else {
+        let mode = cli.color_mode.resolve(spec.scene.preferred_color_mode());
+        let Some(scene) = AnyScene::new(spec.scene, seed, mode) else {
             info!(panel = spec.label, "panel disabled");
             continue;
         };
 
-        let matrix = open_panel(&spec, cli.simulate, cli.color_mode)?;
+        let matrix = open_panel(&spec, cli.simulate, mode)?;
         let stop = Arc::clone(&shutdown);
         let (label, fps, brightness) = (spec.label, cli.fps, cli.brightness);
 

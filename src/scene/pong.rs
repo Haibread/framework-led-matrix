@@ -11,6 +11,7 @@ use rand::RngExt;
 use rand::rngs::StdRng;
 
 use crate::canvas::{self, Canvas};
+use crate::device::ColorMode;
 use crate::font;
 use crate::scene::{Scene, rng_from};
 
@@ -89,6 +90,7 @@ enum Phase {
 
 /// A self-playing game of Pong.
 pub struct Pong {
+    mode: ColorMode,
     rng: StdRng,
     ball: Ball,
     top: Paddle,
@@ -101,8 +103,9 @@ pub struct Pong {
 impl Pong {
     /// Starts a match. `seed` makes the run reproducible.
     #[must_use]
-    pub fn new(seed: Option<u64>) -> Self {
+    pub fn new(seed: Option<u64>, mode: ColorMode) -> Self {
         Self {
+            mode,
             rng: rng_from(seed),
             ball: Ball {
                 x: CENTRE_X,
@@ -250,12 +253,26 @@ impl Pong {
         canvas.hline(centre - 1, centre + 1, row, u8::MAX);
     }
 
-    /// Draws the ball spread over the pixels it overlaps.
+    /// Draws the ball.
     ///
-    /// The panel has 8-bit brightness per LED, so a ball sitting between two
-    /// pixels can light both proportionally. It reads as smooth motion instead
-    /// of a dot snapping from cell to cell.
+    /// In greyscale it is spread over the pixels it overlaps: the panel has
+    /// 8-bit brightness per LED, so a ball between two pixels lights both
+    /// proportionally and reads as smooth motion rather than a dot snapping
+    /// from cell to cell.
+    ///
+    /// In black and white that same spread is a liability — thresholding turns
+    /// it into a ball that flickers between one and two pixels wide as it
+    /// travels — so it snaps to the nearest pixel and stays crisp.
     fn draw_ball(&self, canvas: &mut Canvas) {
+        if self.mode == ColorMode::Bw {
+            canvas.set_max(
+                canvas::to_pixel(self.ball.x),
+                canvas::to_pixel(self.ball.y),
+                u8::MAX,
+            );
+            return;
+        }
+
         let x0 = canvas::floor_pixel(self.ball.x);
         let y0 = canvas::floor_pixel(self.ball.y);
         let fx = self.ball.x - self.ball.x.floor();
@@ -385,6 +402,7 @@ fn fold(x: f32) -> f32 {
 mod tests {
     use super::{Ball, MAX_X, Phase, Pong, WIN_SCORE, covers, fold, predict_x};
     use crate::canvas::Canvas;
+    use crate::device::ColorMode;
     use crate::scene::Scene;
     use std::time::Duration;
 
@@ -452,7 +470,7 @@ mod tests {
 
     #[test]
     fn the_ball_never_leaves_the_field() {
-        let mut pong = Pong::new(Some(42));
+        let mut pong = Pong::new(Some(42), ColorMode::Bw);
         for _ in 0..6_000 {
             pong.update(FRAME);
             assert!(
@@ -470,7 +488,7 @@ mod tests {
 
     #[test]
     fn paddles_stay_on_the_panel() {
-        let mut pong = Pong::new(Some(7));
+        let mut pong = Pong::new(Some(7), ColorMode::Bw);
         for _ in 0..6_000 {
             pong.update(FRAME);
             for paddle in [pong.top, pong.bottom] {
@@ -485,7 +503,7 @@ mod tests {
 
     #[test]
     fn both_robots_are_beatable_and_eventually_score() {
-        let mut pong = Pong::new(Some(3));
+        let mut pong = Pong::new(Some(3), ColorMode::Bw);
         // Two minutes of play at 30 fps.
         run(&mut pong, 3_600);
         assert!(
@@ -496,7 +514,7 @@ mod tests {
 
     #[test]
     fn a_match_resets_instead_of_running_past_the_win_score() {
-        let mut pong = Pong::new(Some(11));
+        let mut pong = Pong::new(Some(11), ColorMode::Bw);
         for _ in 0..40_000 {
             pong.update(FRAME);
             assert!(pong.score_top <= WIN_SCORE && pong.score_bottom <= WIN_SCORE);
@@ -505,7 +523,7 @@ mod tests {
 
     #[test]
     fn rallies_speed_up_but_stay_bounded() {
-        let mut pong = Pong::new(Some(5));
+        let mut pong = Pong::new(Some(5), ColorMode::Bw);
         for _ in 0..20_000 {
             pong.update(FRAME);
             let speed = pong.ball.vx.hypot(pong.ball.vy);
@@ -518,7 +536,7 @@ mod tests {
 
     #[test]
     fn the_score_screen_replaces_the_field() {
-        let mut pong = Pong::new(Some(1));
+        let mut pong = Pong::new(Some(1), ColorMode::Bw);
         pong.score_top = 3;
         pong.score_bottom = 5;
         pong.phase = Phase::Scored(1.0);
@@ -531,8 +549,52 @@ mod tests {
     }
 
     #[test]
+    fn the_ball_is_a_single_pixel_in_black_and_white() {
+        // Thresholding an antialiased ball makes it flicker between one and two
+        // pixels wide as it travels, which reads as a wobble rather than motion.
+        let mut pong = Pong::new(Some(1), ColorMode::Bw);
+        pong.phase = Phase::Rally;
+        // Park it exactly between two pixels, the worst case for a splat.
+        pong.ball = Ball {
+            x: 3.5,
+            y: 17.5,
+            vx: 0.0,
+            vy: 1.0,
+        };
+
+        let mut canvas = Canvas::new();
+        pong.render(&mut canvas);
+
+        // Brighter than the midline, which also lives between the paddles.
+        let lit = (0..9)
+            .flat_map(|x| (2..32).map(move |y| (x, y)))
+            .filter(|(x, y)| canvas.get(*x, *y) > super::MIDLINE_LEVEL)
+            .count();
+        assert_eq!(lit, 1, "the ball covered {lit} pixels");
+    }
+
+    #[test]
+    fn the_ball_is_spread_over_two_pixels_in_greyscale() {
+        let mut pong = Pong::new(Some(1), ColorMode::Greyscale);
+        pong.phase = Phase::Rally;
+        pong.ball = Ball {
+            x: 3.5,
+            y: 17.0,
+            vx: 0.0,
+            vy: 1.0,
+        };
+
+        let mut canvas = Canvas::new();
+        pong.render(&mut canvas);
+
+        assert_eq!(canvas.get(3, 17), canvas.get(4, 17), "not evenly split");
+        assert!(canvas.get(3, 17) > 0, "the ball vanished");
+        assert!(canvas.get(3, 17) < 255, "the split was not partial");
+    }
+
+    #[test]
     fn paddles_are_drawn_on_the_outer_rows() {
-        let mut pong = Pong::new(Some(1));
+        let mut pong = Pong::new(Some(1), ColorMode::Bw);
         run(&mut pong, 60);
 
         let mut canvas = Canvas::new();
