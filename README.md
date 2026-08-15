@@ -147,11 +147,25 @@ about.
 
 ## Protocol notes
 
-Commands are `[0x32, 0xAC, <command>, <args...>]`. A frame is nine
+Commands are `[0x32, 0xAC, <command>, <args...>]`. A frame is up to nine
 `StageGreyColumn` (`0x07`) messages, each carrying a column index and 34
 brightness bytes, followed by one `CommitColumns` (`0x08`) so the panel swaps
-the whole image at once. Brightness is `0x00`. At 30 fps that is about 10 kB/s
-per module, which the link does not notice.
+the whole image at once. Brightness is `0x00`.
+
+Two firmware properties dictate how this is sent, and both are easy to trip
+over because breaking either one still reports success on every write:
+
+- **One command per write.** The firmware reads into a 64-byte buffer and parses
+  exactly one command per read. Batching a whole frame into one 345-byte write
+  gets the first column parsed and everything after it — including the commit —
+  silently dropped, leaving the panel dark.
+- **Send only what moved.** It drains roughly 60 commands a second, so a blind
+  ten-command frame caps the panel at 6 fps. Columns are compared against the
+  last committed frame and only the changed ones are sent, which measures at
+  about 18 fps for pong and 14 for snake.
+
+The frame rate is therefore bounded by how much of the picture moves, not by
+the link, which is nowhere near saturated at roughly 4 kB/s per module.
 
 ## Licence
 

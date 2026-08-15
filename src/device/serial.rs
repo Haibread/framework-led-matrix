@@ -38,6 +38,10 @@ pub struct SerialMatrix {
     // exposes no concrete type to name here, so static dispatch is impossible.
     port: Box<dyn serialport::SerialPort>,
     frame: Vec<u8>,
+    /// What the panel is known to be showing, or `None` when that is unknown.
+    ///
+    /// Kept so only the columns that actually changed are sent. See [`Self::draw`].
+    displayed: Option<Canvas>,
 }
 
 impl SerialMatrix {
@@ -57,6 +61,9 @@ impl SerialMatrix {
         let mut matrix = Self {
             port,
             frame: Vec::with_capacity(MAX_COMMAND_LEN),
+            // Nothing is known about what the module is showing yet, so the
+            // first frame is sent in full.
+            displayed: None,
         };
 
         // A sleeping module stops draining its USB buffer, so the first frames
@@ -99,22 +106,51 @@ impl Matrix for SerialMatrix {
         self.send(CMD_BRIGHTNESS, &[level])
     }
 
+    /// Sends the columns that changed, then commits them.
+    ///
+    /// Two constraints shape this.
+    ///
+    /// One write per command, never a batched frame: the firmware reads into a
+    /// 64-byte buffer and parses exactly one command per read, so a single
+    /// 345-byte write of a whole frame gets its first column parsed and
+    /// everything after it — including the commit — silently dropped. The panel
+    /// then stays dark while every write still reports success.
+    ///
+    /// And it drains roughly one command per main-loop iteration, measured at
+    /// about 60 a second. A blind full frame is ten of them, which caps the
+    /// panel at 6 fps. Sending only what moved — two to four columns for these
+    /// scenes — is what buys back a watchable frame rate.
     fn draw(&mut self, canvas: &Canvas) -> Result<()> {
-        // One write per command, never a batched frame. The firmware reads into
-        // a 64-byte buffer and parses exactly one command per read, so a single
-        // 345-byte write of the whole frame gets its first column parsed and
-        // everything after it — including the commit — silently dropped. The
-        // panel then stays dark while every write still reports success.
+        let mut staged = 0;
+
         for x in 0..canvas::WIDTH {
+            if !column_changed(self.displayed.as_ref(), canvas, x) {
+                continue;
+            }
+
             self.frame.clear();
             encode_column(canvas, x, &mut self.frame);
-            self.port
-                .write_all(&self.frame)
-                .with_context(|| format!("staging column {x}"))?;
+            if let Err(error) = self.port.write_all(&self.frame) {
+                // The panel is now in an unknown state: resend everything next
+                // time rather than leaving a stale column behind.
+                self.displayed = None;
+                return Err(error).with_context(|| format!("staging column {x}"));
+            }
+            staged += 1;
         }
 
-        self.send(CMD_COMMIT_COLUMNS, &[])
-            .context("writing frame to the module")
+        if staged == 0 {
+            return Ok(());
+        }
+
+        if let Err(error) = self.send(CMD_COMMIT_COLUMNS, &[]) {
+            self.displayed = None;
+            return Err(error).context("writing frame to the module");
+        }
+
+        debug!(staged, "committed a frame");
+        self.displayed = Some(canvas.clone());
+        Ok(())
     }
 
     fn clear(&mut self) -> Result<()> {
@@ -134,6 +170,13 @@ const FIRMWARE_READ_BUFFER: usize = 64;
 
 const _: () = assert!(MAX_COMMAND_LEN <= FIRMWARE_READ_BUFFER);
 
+/// Whether column `x` needs resending, given what the panel is showing.
+///
+/// An unknown panel state counts as changed: every column is resent.
+fn column_changed(displayed: Option<&Canvas>, next: &Canvas, x: i32) -> bool {
+    displayed.is_none_or(|shown| shown.column(x) != next.column(x))
+}
+
 /// Serialises column `x` of the canvas as one `StageGreyColumn` command.
 fn encode_column(canvas: &Canvas, x: i32, out: &mut Vec<u8>) {
     out.extend_from_slice(&MAGIC);
@@ -147,9 +190,9 @@ fn encode_column(canvas: &Canvas, x: i32, out: &mut Vec<u8>) {
 mod tests {
     use super::{
         CMD_BRIGHTNESS, CMD_SLEEP, CMD_STAGE_COLUMN, FIRMWARE_READ_BUFFER, MAGIC, MAX_COMMAND_LEN,
-        ROWS, command_frame, encode_column,
+        ROWS, column_changed, command_frame, encode_column,
     };
-    use crate::canvas::Canvas;
+    use crate::canvas::{self, Canvas};
 
     fn encode(canvas: &Canvas, x: i32) -> Vec<u8> {
         let mut out = Vec::new();
@@ -198,6 +241,51 @@ mod tests {
     fn a_column_carries_one_byte_per_row() {
         let column = encode(&Canvas::new(), 4);
         assert_eq!(column.len() - MAGIC.len() - 2, ROWS);
+    }
+
+    #[test]
+    fn an_unknown_panel_gets_every_column_resent() {
+        let canvas = Canvas::new();
+        for x in 0..canvas::WIDTH {
+            assert!(column_changed(None, &canvas, x));
+        }
+    }
+
+    #[test]
+    fn an_unchanged_panel_gets_nothing_resent() {
+        let canvas = Canvas::new();
+        for x in 0..canvas::WIDTH {
+            assert!(!column_changed(Some(&canvas), &canvas, x));
+        }
+    }
+
+    #[test]
+    fn only_the_columns_that_moved_are_resent() {
+        // The whole frame rate rests on this: the module drains about 60
+        // commands a second, so a blind ten-command frame caps the panel at 6
+        // fps. A moving ball touches two columns, not nine.
+        let displayed = Canvas::new();
+        let mut next = displayed.clone();
+        next.set(3, 10, 255);
+        next.set(4, 10, 128);
+
+        let resent: Vec<i32> = (0..canvas::WIDTH)
+            .filter(|x| column_changed(Some(&displayed), &next, *x))
+            .collect();
+        assert_eq!(resent, vec![3, 4]);
+    }
+
+    #[test]
+    fn a_dimmed_pixel_counts_as_a_change() {
+        // Brightness-only differences must not be missed, or the antialiased
+        // ball would smear across the panel.
+        let mut displayed = Canvas::new();
+        displayed.set(5, 20, 255);
+        let mut next = displayed.clone();
+        next.set(5, 20, 254);
+
+        assert!(column_changed(Some(&displayed), &next, 5));
+        assert!(!column_changed(Some(&displayed), &next, 4));
     }
 
     #[test]

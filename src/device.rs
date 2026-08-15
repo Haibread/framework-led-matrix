@@ -26,6 +26,11 @@ pub trait Matrix {
 ///
 /// An enum rather than a trait object: the set of backends is closed and known
 /// at compile time, so this keeps dispatch static.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "exactly one of these exists per panel, and the big variant is the \
+              cached frame that keeps the module from being redrawn in full"
+)]
 pub enum Panel {
     /// A real module on a serial port.
     Serial(SerialMatrix),
