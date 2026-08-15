@@ -32,19 +32,29 @@ const BAUD_RATE: u32 = 115_200;
 /// A write should never block for long; a stalled module is a bug, not a wait.
 const WRITE_TIMEOUT: Duration = Duration::from_millis(250);
 
+/// The port type used against real hardware.
+///
+/// `serialport::new().open()` hands back a boxed trait object and the crate
+/// exposes no concrete type to name, so this one indirection is forced on us.
+type Port = Box<dyn serialport::SerialPort>;
+
 /// A real LED matrix module reached over a serial port.
-pub struct SerialMatrix {
-    // `serialport::new().open()` hands back a boxed trait object; the crate
-    // exposes no concrete type to name here, so static dispatch is impossible.
-    port: Box<dyn serialport::SerialPort>,
+///
+/// Generic over where the bytes go so the wire protocol can be tested against a
+/// buffer. Both protocol bugs this module has had — a batched frame, and partial
+/// column updates — were invisible from the outside: every write returned
+/// success while the panel showed the wrong thing. The only way to catch them is
+/// to assert on the exact byte stream.
+pub struct SerialMatrix<W = Port> {
+    port: W,
     frame: Vec<u8>,
     /// What the panel is known to be showing, or `None` when that is unknown.
     ///
-    /// Kept so only the columns that actually changed are sent. See [`Self::draw`].
+    /// Only used to skip a frame identical to the last one. See [`Self::draw`].
     displayed: Option<Canvas>,
 }
 
-impl SerialMatrix {
+impl SerialMatrix<Port> {
     /// Opens the module at `path`, e.g. `/dev/ttyACM0`.
     ///
     /// # Errors
@@ -58,13 +68,7 @@ impl SerialMatrix {
             .with_context(|| format!("opening LED matrix at {path}"))?;
 
         info!(device = path, "opened LED matrix");
-        let mut matrix = Self {
-            port,
-            frame: Vec::with_capacity(MAX_COMMAND_LEN),
-            // Nothing is known about what the module is showing yet, so the
-            // first frame is sent in full.
-            displayed: None,
-        };
+        let mut matrix = Self::new(port);
 
         // A sleeping module stops draining its USB buffer, so the first frames
         // sent to it time out instead of being drawn. Waking it up front turns
@@ -74,6 +78,19 @@ impl SerialMatrix {
         }
 
         Ok(matrix)
+    }
+}
+
+impl<W: Write> SerialMatrix<W> {
+    /// Wraps a byte sink as a module.
+    fn new(port: W) -> Self {
+        Self {
+            port,
+            frame: Vec::with_capacity(MAX_COMMAND_LEN),
+            // Nothing is known about what the module is showing yet, so the
+            // first frame is sent in full.
+            displayed: None,
+        }
     }
 
     /// Tells the module to wake up.
@@ -100,55 +117,48 @@ fn command_frame(command: u8, args: &[u8]) -> Vec<u8> {
     message
 }
 
-impl Matrix for SerialMatrix {
+impl<W: Write> Matrix for SerialMatrix<W> {
     fn set_brightness(&mut self, level: u8) -> Result<()> {
         debug!(level, "setting brightness");
         self.send(CMD_BRIGHTNESS, &[level])
     }
 
-    /// Sends the columns that changed, then commits them.
+    /// Stages all nine columns, then commits them.
     ///
-    /// Two constraints shape this.
+    /// Two firmware properties dictate this, and breaking either one still
+    /// reports success on every write.
     ///
     /// One write per command, never a batched frame: the firmware reads into a
     /// 64-byte buffer and parses exactly one command per read, so a single
     /// 345-byte write of a whole frame gets its first column parsed and
     /// everything after it — including the commit — silently dropped. The panel
-    /// then stays dark while every write still reports success.
+    /// then stays dark.
     ///
-    /// And it drains roughly one command per main-loop iteration, measured at
-    /// about 60 a second. A blind full frame is ten of them, which caps the
-    /// panel at 6 fps. Sending only what moved — two to four columns for these
-    /// scenes — is what buys back a watchable frame rate.
+    /// And every column, every time. Committing does
+    /// `grid = col_buffer.clone(); col_buffer = percentage(0)` — it *zeroes* the
+    /// staging buffer. Sending only the columns that changed therefore commits a
+    /// frame that is black everywhere else, and the panel strobes as each frame
+    /// shows just the pixels that moved. There is no partial update to be had
+    /// here; the only frame worth skipping is one that is identical to the last.
     fn draw(&mut self, canvas: &Canvas) -> Result<()> {
-        let mut staged = 0;
-
-        for x in 0..canvas::WIDTH {
-            if !column_changed(self.displayed.as_ref(), canvas, x) {
-                continue;
-            }
-
-            self.frame.clear();
-            encode_column(canvas, x, &mut self.frame);
-            if let Err(error) = self.port.write_all(&self.frame) {
-                // The panel is now in an unknown state: resend everything next
-                // time rather than leaving a stale column behind.
-                self.displayed = None;
-                return Err(error).with_context(|| format!("staging column {x}"));
-            }
-            staged += 1;
-        }
-
-        if staged == 0 {
+        if self.displayed.as_ref() == Some(canvas) {
             return Ok(());
         }
 
-        if let Err(error) = self.send(CMD_COMMIT_COLUMNS, &[]) {
-            self.displayed = None;
-            return Err(error).context("writing frame to the module");
+        // Until the commit lands, the panel's contents are unknown.
+        self.displayed = None;
+
+        for x in 0..canvas::WIDTH {
+            self.frame.clear();
+            encode_column(canvas, x, &mut self.frame);
+            self.port
+                .write_all(&self.frame)
+                .with_context(|| format!("staging column {x}"))?;
         }
 
-        debug!(staged, "committed a frame");
+        self.send(CMD_COMMIT_COLUMNS, &[])
+            .context("writing frame to the module")?;
+
         self.displayed = Some(canvas.clone());
         Ok(())
     }
@@ -170,13 +180,6 @@ const FIRMWARE_READ_BUFFER: usize = 64;
 
 const _: () = assert!(MAX_COMMAND_LEN <= FIRMWARE_READ_BUFFER);
 
-/// Whether column `x` needs resending, given what the panel is showing.
-///
-/// An unknown panel state counts as changed: every column is resent.
-fn column_changed(displayed: Option<&Canvas>, next: &Canvas, x: i32) -> bool {
-    displayed.is_none_or(|shown| shown.column(x) != next.column(x))
-}
-
 /// Serialises column `x` of the canvas as one `StageGreyColumn` command.
 fn encode_column(canvas: &Canvas, x: i32, out: &mut Vec<u8>) {
     out.extend_from_slice(&MAGIC);
@@ -189,10 +192,11 @@ fn encode_column(canvas: &Canvas, x: i32, out: &mut Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::{
-        CMD_BRIGHTNESS, CMD_SLEEP, CMD_STAGE_COLUMN, FIRMWARE_READ_BUFFER, MAGIC, MAX_COMMAND_LEN,
-        ROWS, column_changed, command_frame, encode_column,
+        CMD_BRIGHTNESS, CMD_COMMIT_COLUMNS, CMD_SLEEP, CMD_STAGE_COLUMN, FIRMWARE_READ_BUFFER,
+        MAGIC, MAX_COMMAND_LEN, ROWS, SerialMatrix, command_frame, encode_column,
     };
-    use crate::canvas::{self, Canvas};
+    use crate::canvas::Canvas;
+    use crate::device::Matrix;
 
     fn encode(canvas: &Canvas, x: i32) -> Vec<u8> {
         let mut out = Vec::new();
@@ -243,49 +247,92 @@ mod tests {
         assert_eq!(column.len() - MAGIC.len() - 2, ROWS);
     }
 
-    #[test]
-    fn an_unknown_panel_gets_every_column_resent() {
-        let canvas = Canvas::new();
-        for x in 0..canvas::WIDTH {
-            assert!(column_changed(None, &canvas, x));
+    /// A port that keeps each write separate.
+    ///
+    /// The boundaries are the point: the firmware parses one command per read,
+    /// so a test that only sees the concatenated bytes cannot tell a correct
+    /// frame from one batched into a single write.
+    #[derive(Default)]
+    struct Recorder {
+        writes: Vec<Vec<u8>>,
+    }
+
+    impl std::io::Write for Recorder {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.writes.push(buf.to_vec());
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
         }
     }
 
     #[test]
-    fn an_unchanged_panel_gets_nothing_resent() {
-        let canvas = Canvas::new();
-        for x in 0..canvas::WIDTH {
-            assert!(!column_changed(Some(&canvas), &canvas, x));
+    fn a_frame_is_nine_column_writes_then_a_commit() {
+        // The regression test for two separate bugs that each left the panel
+        // wrong while every write reported success: batching the whole frame
+        // into one write, and staging only the columns that changed. Committing
+        // zeroes the firmware's staging buffer, so a frame is all nine columns
+        // or it is a strobe.
+        let mut matrix = SerialMatrix::new(Recorder::default());
+        matrix.draw(&Canvas::new()).expect("draw into the recorder");
+
+        let writes = &matrix.port.writes;
+        assert_eq!(writes.len(), 10, "expected nine columns and a commit");
+
+        for (x, command) in writes.iter().take(9).enumerate() {
+            assert_eq!(
+                command.len(),
+                MAX_COMMAND_LEN,
+                "column {x} is the wrong size"
+            );
+            assert_eq!(command[0..2], MAGIC, "column {x} lost its magic prefix");
+            assert_eq!(command[2], CMD_STAGE_COLUMN, "write {x} is not a column");
+            assert_eq!(command[3], u8::try_from(x).unwrap(), "wrong column index");
+        }
+        assert_eq!(writes[9], [MAGIC[0], MAGIC[1], CMD_COMMIT_COLUMNS]);
+    }
+
+    #[test]
+    fn every_write_fits_in_one_firmware_read() {
+        let mut matrix = SerialMatrix::new(Recorder::default());
+        matrix.set_brightness(40).unwrap();
+        matrix.wake().unwrap();
+        matrix.draw(&Canvas::new()).unwrap();
+
+        for command in &matrix.port.writes {
+            assert!(
+                command.len() <= FIRMWARE_READ_BUFFER,
+                "a {}-byte write cannot be read whole",
+                command.len()
+            );
         }
     }
 
     #[test]
-    fn only_the_columns_that_moved_are_resent() {
-        // The whole frame rate rests on this: the module drains about 60
-        // commands a second, so a blind ten-command frame caps the panel at 6
-        // fps. A moving ball touches two columns, not nine.
-        let displayed = Canvas::new();
-        let mut next = displayed.clone();
-        next.set(3, 10, 255);
-        next.set(4, 10, 128);
+    fn an_unchanged_frame_is_not_resent() {
+        // Worth skipping because the module drains only about 60 commands a
+        // second: a still picture should cost nothing.
+        let mut matrix = SerialMatrix::new(Recorder::default());
+        let canvas = Canvas::new();
 
-        let resent: Vec<i32> = (0..canvas::WIDTH)
-            .filter(|x| column_changed(Some(&displayed), &next, *x))
-            .collect();
-        assert_eq!(resent, vec![3, 4]);
+        matrix.draw(&canvas).unwrap();
+        matrix.draw(&canvas).unwrap();
+
+        assert_eq!(matrix.port.writes.len(), 10, "resent an identical frame");
     }
 
     #[test]
-    fn a_dimmed_pixel_counts_as_a_change() {
-        // Brightness-only differences must not be missed, or the antialiased
-        // ball would smear across the panel.
-        let mut displayed = Canvas::new();
-        displayed.set(5, 20, 255);
-        let mut next = displayed.clone();
-        next.set(5, 20, 254);
+    fn a_one_pixel_change_still_resends_every_column() {
+        let mut matrix = SerialMatrix::new(Recorder::default());
+        matrix.draw(&Canvas::new()).unwrap();
 
-        assert!(column_changed(Some(&displayed), &next, 5));
-        assert!(!column_changed(Some(&displayed), &next, 4));
+        let mut moved = Canvas::new();
+        moved.set(3, 10, 255);
+        matrix.draw(&moved).unwrap();
+
+        assert_eq!(matrix.port.writes.len(), 20, "partial update would strobe");
     }
 
     #[test]

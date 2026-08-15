@@ -159,13 +159,20 @@ over because breaking either one still reports success on every write:
   exactly one command per read. Batching a whole frame into one 345-byte write
   gets the first column parsed and everything after it — including the commit —
   silently dropped, leaving the panel dark.
-- **Send only what moved.** It drains roughly 60 commands a second, so a blind
-  ten-command frame caps the panel at 6 fps. Columns are compared against the
-  last committed frame and only the changed ones are sent, which measures at
-  about 18 fps for pong and 14 for snake.
+- **Every column, every frame.** Committing runs
+  `grid = col_buffer.clone(); col_buffer = percentage(0)` — it *zeroes* the
+  staging buffer. Sending only the columns that changed therefore commits a
+  frame that is black everywhere else, and the panel strobes. There is no
+  partial update to be had; the only frame worth skipping is one identical to
+  the last, which is what a still picture costs nothing.
 
-The frame rate is therefore bounded by how much of the picture moves, not by
-the link, which is nowhere near saturated at roughly 4 kB/s per module.
+This sets a hard ceiling. The module drains roughly 60 commands a second, and a
+greyscale frame is ten of them, so the panel tops out at about **6 fps**. The
+link is nowhere near saturated — it is the firmware's command rate that binds.
+
+A `DisplayBwImage` (`0x06`) frame is a single 39-byte command and would run
+about six times faster, at the cost of the per-LED brightness the scenes use for
+the antialiased ball and the snake's fading body. That trade is not taken here.
 
 ## Licence
 
