@@ -2,6 +2,7 @@
 
 use clap::Parser;
 
+use crate::device::ColorMode;
 use crate::scene::SceneKind;
 
 /// Default device nodes, created by the shipped udev rule.
@@ -37,6 +38,14 @@ pub struct Cli {
     /// Frames per second
     #[arg(long, env = "FPS", default_value_t = 30, value_parser = clap::value_parser!(u32).range(1..=60))]
     pub fps: u32,
+
+    /// How frames are pushed to the modules
+    ///
+    /// `greyscale` gives per-LED brightness but costs ten commands a frame,
+    /// which the module's command rate caps at about 6 fps. `bw` is one command
+    /// a frame, so roughly six times smoother, with no shading.
+    #[arg(long, env = "COLOR_MODE", default_value_t = ColorMode::Greyscale)]
+    pub color_mode: ColorMode,
 
     /// Render to the terminal instead of the modules
     ///

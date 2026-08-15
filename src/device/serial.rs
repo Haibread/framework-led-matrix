@@ -11,7 +11,12 @@ use anyhow::{Context, Result};
 use tracing::{debug, info, warn};
 
 use crate::canvas::{self, Canvas, ROWS};
-use crate::device::Matrix;
+use crate::device::{BW_THRESHOLD, ColorMode, Matrix};
+
+/// Payload length of a black-and-white frame: one bit per LED, rounded up.
+const DRAW_BYTES: usize = 39;
+
+const _: () = assert!(DRAW_BYTES * 8 >= crate::canvas::PIXELS);
 
 /// Prefix identifying a command to the module.
 const MAGIC: [u8; 2] = [0x32, 0xAC];
@@ -20,6 +25,8 @@ const MAGIC: [u8; 2] = [0x32, 0xAC];
 const CMD_BRIGHTNESS: u8 = 0x00;
 /// Put the module to sleep, or wake it up.
 const CMD_SLEEP: u8 = 0x03;
+/// Draw a whole black-and-white image in one command.
+const CMD_DRAW_BW: u8 = 0x06;
 /// Stage one greyscale column in the module's back buffer.
 const CMD_STAGE_COLUMN: u8 = 0x07;
 /// Commit every staged column to the panel.
@@ -47,6 +54,7 @@ type Port = Box<dyn serialport::SerialPort>;
 /// to assert on the exact byte stream.
 pub struct SerialMatrix<W = Port> {
     port: W,
+    mode: ColorMode,
     frame: Vec<u8>,
     /// What the panel is known to be showing, or `None` when that is unknown.
     ///
@@ -61,14 +69,14 @@ impl SerialMatrix<Port> {
     ///
     /// Fails if the port cannot be opened — usually a wrong path, or missing
     /// permissions on the device node.
-    pub fn open(path: &str) -> Result<Self> {
+    pub fn open(path: &str, mode: ColorMode) -> Result<Self> {
         let port = serialport::new(path, BAUD_RATE)
             .timeout(WRITE_TIMEOUT)
             .open()
             .with_context(|| format!("opening LED matrix at {path}"))?;
 
-        info!(device = path, "opened LED matrix");
-        let mut matrix = Self::new(port);
+        info!(device = path, %mode, "opened LED matrix");
+        let mut matrix = Self::new(port, mode);
 
         // A sleeping module stops draining its USB buffer, so the first frames
         // sent to it time out instead of being drawn. Waking it up front turns
@@ -83,9 +91,10 @@ impl SerialMatrix<Port> {
 
 impl<W: Write> SerialMatrix<W> {
     /// Wraps a byte sink as a module.
-    fn new(port: W) -> Self {
+    fn new(port: W, mode: ColorMode) -> Self {
         Self {
             port,
+            mode,
             frame: Vec::with_capacity(MAX_COMMAND_LEN),
             // Nothing is known about what the module is showing yet, so the
             // first frame is sent in full.
@@ -145,19 +154,26 @@ impl<W: Write> Matrix for SerialMatrix<W> {
             return Ok(());
         }
 
-        // Until the commit lands, the panel's contents are unknown.
+        // Until the frame lands, the panel's contents are unknown.
         self.displayed = None;
 
-        for x in 0..canvas::WIDTH {
-            self.frame.clear();
-            encode_column(canvas, x, &mut self.frame);
-            self.port
-                .write_all(&self.frame)
-                .with_context(|| format!("staging column {x}"))?;
+        match self.mode {
+            ColorMode::Greyscale => {
+                for x in 0..canvas::WIDTH {
+                    self.frame.clear();
+                    encode_column(canvas, x, &mut self.frame);
+                    self.port
+                        .write_all(&self.frame)
+                        .with_context(|| format!("staging column {x}"))?;
+                }
+                self.send(CMD_COMMIT_COLUMNS, &[])
+                    .context("writing frame to the module")?;
+            }
+            ColorMode::Bw => {
+                self.send(CMD_DRAW_BW, &encode_bw(canvas))
+                    .context("writing frame to the module")?;
+            }
         }
-
-        self.send(CMD_COMMIT_COLUMNS, &[])
-            .context("writing frame to the module")?;
 
         self.displayed = Some(canvas.clone());
         Ok(())
@@ -180,6 +196,30 @@ const FIRMWARE_READ_BUFFER: usize = 64;
 
 const _: () = assert!(MAX_COMMAND_LEN <= FIRMWARE_READ_BUFFER);
 
+/// Bit-packs the canvas as the payload of one `DisplayBwImage` command.
+///
+/// The firmware reads bit `x + WIDTH * y`, least significant bit first, and
+/// writes it to column `8 - x` — this path mirrors the image, while the
+/// greyscale path does not. The flip is undone here so both modes show the same
+/// picture rather than each other's reflection.
+fn encode_bw(canvas: &Canvas) -> [u8; DRAW_BYTES] {
+    let mut bytes = [0u8; DRAW_BYTES];
+
+    for y in 0..canvas::HEIGHT {
+        for x in 0..canvas::WIDTH {
+            if canvas.get(x, y) < BW_THRESHOLD {
+                continue;
+            }
+            let Ok(index) = usize::try_from(canvas::WIDTH - 1 - x + canvas::WIDTH * y) else {
+                continue;
+            };
+            bytes[index / 8] |= 1 << (index % 8);
+        }
+    }
+
+    bytes
+}
+
 /// Serialises column `x` of the canvas as one `StageGreyColumn` command.
 fn encode_column(canvas: &Canvas, x: i32, out: &mut Vec<u8>) {
     out.extend_from_slice(&MAGIC);
@@ -192,11 +232,12 @@ fn encode_column(canvas: &Canvas, x: i32, out: &mut Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::{
-        CMD_BRIGHTNESS, CMD_COMMIT_COLUMNS, CMD_SLEEP, CMD_STAGE_COLUMN, FIRMWARE_READ_BUFFER,
-        MAGIC, MAX_COMMAND_LEN, ROWS, SerialMatrix, command_frame, encode_column,
+        CMD_BRIGHTNESS, CMD_COMMIT_COLUMNS, CMD_DRAW_BW, CMD_SLEEP, CMD_STAGE_COLUMN, DRAW_BYTES,
+        FIRMWARE_READ_BUFFER, MAGIC, MAX_COMMAND_LEN, ROWS, SerialMatrix, command_frame, encode_bw,
+        encode_column,
     };
     use crate::canvas::Canvas;
-    use crate::device::Matrix;
+    use crate::device::{BW_THRESHOLD, ColorMode, Matrix};
 
     fn encode(canvas: &Canvas, x: i32) -> Vec<u8> {
         let mut out = Vec::new();
@@ -275,7 +316,7 @@ mod tests {
         // into one write, and staging only the columns that changed. Committing
         // zeroes the firmware's staging buffer, so a frame is all nine columns
         // or it is a strobe.
-        let mut matrix = SerialMatrix::new(Recorder::default());
+        let mut matrix = SerialMatrix::new(Recorder::default(), ColorMode::Greyscale);
         matrix.draw(&Canvas::new()).expect("draw into the recorder");
 
         let writes = &matrix.port.writes;
@@ -295,8 +336,81 @@ mod tests {
     }
 
     #[test]
+    fn a_black_and_white_frame_is_a_single_write() {
+        // The entire point of the mode: one command instead of ten, which is
+        // what lifts the panel off its ~6 fps ceiling.
+        let mut matrix = SerialMatrix::new(Recorder::default(), ColorMode::Bw);
+        matrix.draw(&Canvas::new()).unwrap();
+
+        let writes = &matrix.port.writes;
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0][0..2], MAGIC);
+        assert_eq!(writes[0][2], CMD_DRAW_BW);
+        assert_eq!(writes[0].len(), MAGIC.len() + 1 + DRAW_BYTES);
+        assert!(writes[0].len() <= FIRMWARE_READ_BUFFER);
+    }
+
+    #[test]
+    fn black_and_white_bits_land_where_the_firmware_looks_for_them() {
+        // The firmware reads bit `x + WIDTH * y` and writes it to column
+        // `8 - x`, so the encoder has to mirror to compensate. Getting this
+        // wrong yields a picture that is subtly reflected — easy to miss on
+        // symmetric scenes and maddening to debug later.
+        let mut canvas = Canvas::new();
+        canvas.set(0, 0, 255);
+
+        let bytes = encode_bw(&canvas);
+        // Lighting column 0 must set the bit the firmware maps back to column 0,
+        // which is index 8.
+        assert_eq!(
+            bytes[1], 0b0000_0001,
+            "expected bit 8, got {:08b}",
+            bytes[1]
+        );
+        assert_eq!(bytes[0], 0, "something lit the first eight columns");
+    }
+
+    #[test]
+    fn black_and_white_covers_the_far_corner() {
+        let mut canvas = Canvas::new();
+        canvas.set(8, 33, 255);
+
+        let bytes = encode_bw(&canvas);
+        // Column 8 of the last row is index (8 - 8) + 9 * 33 = 297.
+        assert_eq!(bytes[297 / 8] & (1 << (297 % 8)), 1 << (297 % 8));
+    }
+
+    #[test]
+    fn black_and_white_thresholds_dim_pixels_away() {
+        let mut canvas = Canvas::new();
+        canvas.set(4, 4, BW_THRESHOLD - 1);
+        assert_eq!(encode_bw(&canvas), [0u8; DRAW_BYTES], "a dim pixel lit up");
+
+        canvas.set(4, 4, BW_THRESHOLD);
+        assert_ne!(
+            encode_bw(&canvas),
+            [0u8; DRAW_BYTES],
+            "a lit pixel vanished"
+        );
+    }
+
+    #[test]
+    fn the_snake_tail_survives_the_threshold_but_the_midline_does_not() {
+        // The two values the threshold was picked around; if either flips, the
+        // scenes lose their tail or grow a permanent stripe.
+        let mut canvas = Canvas::new();
+        canvas.set(0, 0, 45); // snake tail
+        canvas.set(1, 0, 18); // pong midline
+
+        let bytes = encode_bw(&canvas);
+        assert_ne!(bytes, [0u8; DRAW_BYTES], "the snake tail went dark");
+        assert_eq!(bytes[1], 0b0000_0001, "only the tail should be lit");
+        assert_eq!(bytes[0], 0);
+    }
+
+    #[test]
     fn every_write_fits_in_one_firmware_read() {
-        let mut matrix = SerialMatrix::new(Recorder::default());
+        let mut matrix = SerialMatrix::new(Recorder::default(), ColorMode::Greyscale);
         matrix.set_brightness(40).unwrap();
         matrix.wake().unwrap();
         matrix.draw(&Canvas::new()).unwrap();
@@ -314,7 +428,7 @@ mod tests {
     fn an_unchanged_frame_is_not_resent() {
         // Worth skipping because the module drains only about 60 commands a
         // second: a still picture should cost nothing.
-        let mut matrix = SerialMatrix::new(Recorder::default());
+        let mut matrix = SerialMatrix::new(Recorder::default(), ColorMode::Greyscale);
         let canvas = Canvas::new();
 
         matrix.draw(&canvas).unwrap();
@@ -325,7 +439,7 @@ mod tests {
 
     #[test]
     fn a_one_pixel_change_still_resends_every_column() {
-        let mut matrix = SerialMatrix::new(Recorder::default());
+        let mut matrix = SerialMatrix::new(Recorder::default(), ColorMode::Greyscale);
         matrix.draw(&Canvas::new()).unwrap();
 
         let mut moved = Canvas::new();

@@ -22,9 +22,9 @@ use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use cli::Cli;
-use device::Panel;
 use device::serial::SerialMatrix;
 use device::terminal::TerminalMatrix;
+use device::{ColorMode, Panel};
 use scene::{AnyScene, SceneKind};
 
 /// Terminal columns the preview panels are drawn at.
@@ -74,7 +74,7 @@ async fn main() -> Result<()> {
             continue;
         };
 
-        let matrix = open_panel(&spec, cli.simulate)?;
+        let matrix = open_panel(&spec, cli.simulate, cli.color_mode)?;
         let stop = Arc::clone(&shutdown);
         let (label, fps, brightness) = (spec.label, cli.fps, cli.brightness);
 
@@ -104,15 +104,16 @@ async fn main() -> Result<()> {
 }
 
 /// Opens one panel, on hardware or in the terminal.
-fn open_panel(spec: &PanelSpec, simulate: bool) -> Result<Panel> {
+fn open_panel(spec: &PanelSpec, simulate: bool, mode: ColorMode) -> Result<Panel> {
     if simulate {
         return Ok(Panel::Terminal(TerminalMatrix::new(
             spec.label,
             spec.preview_column,
+            mode,
         )));
     }
 
-    let matrix = SerialMatrix::open(&spec.device).with_context(|| {
+    let matrix = SerialMatrix::open(&spec.device, mode).with_context(|| {
         format!(
             "opening the {} panel — is the udev rule installed? \
              Try --simulate to run without hardware",

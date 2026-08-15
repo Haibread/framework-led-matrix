@@ -9,7 +9,7 @@ use std::sync::Once;
 use anyhow::{Context, Result};
 
 use crate::canvas::{self, Canvas};
-use crate::device::Matrix;
+use crate::device::{BW_THRESHOLD, ColorMode, Matrix};
 
 /// Hide the cursor and clear the screen, once per process.
 static SCREEN_SETUP: Once = Once::new();
@@ -21,6 +21,7 @@ const GRID_TOP: usize = 2;
 pub struct TerminalMatrix {
     label: &'static str,
     column: usize,
+    mode: ColorMode,
     brightness: u8,
     buffer: String,
 }
@@ -28,7 +29,7 @@ pub struct TerminalMatrix {
 impl TerminalMatrix {
     /// Creates a preview panel whose left edge sits at terminal `column`.
     #[must_use]
-    pub fn new(label: &'static str, column: usize) -> Self {
+    pub fn new(label: &'static str, column: usize, mode: ColorMode) -> Self {
         SCREEN_SETUP.call_once(|| {
             // Hide the cursor and clear the screen. Failure here is cosmetic.
             let mut out = std::io::stdout().lock();
@@ -39,13 +40,22 @@ impl TerminalMatrix {
         Self {
             label,
             column,
+            mode,
             brightness: 255,
             buffer: String::with_capacity(8 * 1024),
         }
     }
 
     /// Scales a pixel by the emulated global brightness.
+    ///
+    /// In [`ColorMode::Bw`] the pixel is thresholded first, so the preview shows
+    /// what the module would show rather than a nicer greyscale version of it.
     fn shade(&self, value: u8) -> u8 {
+        let value = match self.mode {
+            ColorMode::Greyscale => value,
+            ColorMode::Bw if value >= BW_THRESHOLD => u8::MAX,
+            ColorMode::Bw => 0,
+        };
         u8::try_from((u32::from(value) * u32::from(self.brightness)) / 255).unwrap_or(u8::MAX)
     }
 
@@ -111,11 +121,11 @@ impl Matrix for TerminalMatrix {
 mod tests {
     use super::TerminalMatrix;
     use crate::canvas::Canvas;
-    use crate::device::Matrix;
+    use crate::device::{ColorMode, Matrix};
 
     #[test]
     fn a_frame_positions_every_row_of_the_panel() {
-        let mut matrix = TerminalMatrix::new("left", 3);
+        let mut matrix = TerminalMatrix::new("left", 3, ColorMode::Greyscale);
         matrix.compose(&Canvas::new());
         // 34 rows drawn two at a time, plus the label line.
         assert!(matrix.buffer.matches("\x1b[").count() > 17);
@@ -125,7 +135,7 @@ mod tests {
 
     #[test]
     fn brightness_dims_the_preview() {
-        let mut matrix = TerminalMatrix::new("left", 3);
+        let mut matrix = TerminalMatrix::new("left", 3, ColorMode::Greyscale);
         let mut canvas = Canvas::new();
         canvas.set(0, 0, 255);
 
@@ -140,7 +150,7 @@ mod tests {
 
     #[test]
     fn shading_never_overflows() {
-        let mut matrix = TerminalMatrix::new("left", 3);
+        let mut matrix = TerminalMatrix::new("left", 3, ColorMode::Greyscale);
         matrix.set_brightness(255).unwrap();
         assert_eq!(matrix.shade(255), 255);
         matrix.set_brightness(0).unwrap();

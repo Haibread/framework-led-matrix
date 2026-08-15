@@ -92,6 +92,7 @@ Every option can be set as a flag or an environment variable. Flags win.
 | `--right-scene` | `RIGHT_SCENE` | `snake` | `pong`, `snake` or `off` |
 | `--brightness` | `BRIGHTNESS` | `30` | 0 to 255; the modules sit under your hands, past ~80 is a desk lamp |
 | `--fps` | `FPS` | `30` | 1 to 60 |
+| `--color-mode` | `COLOR_MODE` | `greyscale` | `greyscale` (shading, ~6 fps) or `bw` (no shading, ~6x faster) |
 | `--simulate` | `SIMULATE` | `false` | Draw in the terminal instead of on the modules |
 | `--seed` | `SEED` | — | Seed the scenes for a reproducible run |
 | `--log-filter` | `LOG_FILTER` | `info` | `tracing` filter directive |
@@ -170,9 +171,16 @@ This sets a hard ceiling. The module drains roughly 60 commands a second, and a
 greyscale frame is ten of them, so the panel tops out at about **6 fps**. The
 link is nowhere near saturated — it is the firmware's command rate that binds.
 
-A `DisplayBwImage` (`0x06`) frame is a single 39-byte command and would run
-about six times faster, at the cost of the per-LED brightness the scenes use for
-the antialiased ball and the snake's fading body. That trade is not taken here.
+`--color-mode bw` takes the other side of that trade: a `DisplayBwImage`
+(`0x06`) frame is a single 39-byte command, so it runs about six times faster
+and loses the per-LED brightness the scenes use for the antialiased ball and the
+snake's fading body. Pixels at or above brightness 40 count as lit, which keeps
+the snake's tail (45) visible and the pong midline (18) dark.
+
+One trap in that path: the firmware reads bit `x + WIDTH * y` and writes it to
+column `8 - x`, so it mirrors the image, while the greyscale path does not. The
+encoder flips it back, otherwise the two modes show each other's reflection —
+which is nearly invisible on symmetric scenes and very annoying to find later.
 
 ## Licence
 
