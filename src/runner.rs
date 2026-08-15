@@ -6,7 +6,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::canvas::Canvas;
 use crate::device::Matrix;
@@ -22,6 +22,15 @@ const MAX_FRAME_DELTA: Duration = Duration::from_millis(100);
 /// How often to report progress at debug level.
 const FRAME_LOG_INTERVAL: u64 = 600;
 
+/// Consecutive dropped frames tolerated before a panel gives up.
+///
+/// A timed-out write is usually a USB hiccup — the modules do it when they have
+/// just been re-enumerated, for instance. The firmware resynchronises on the
+/// next magic bytes, so the real cost is one glitched frame, whereas quitting on
+/// the first failure takes the panel down for the rest of the session. At 30 fps
+/// this is roughly a second of patience before calling the module dead.
+const MAX_DROPPED_FRAMES: u32 = 30;
+
 /// Runs `scene` on `matrix` until `shutdown` is raised.
 ///
 /// This blocks, so it belongs on its own thread. On the way out it clears the
@@ -30,7 +39,8 @@ const FRAME_LOG_INTERVAL: u64 = 600;
 ///
 /// # Errors
 ///
-/// Fails if the panel rejects a write — typically the module being unplugged.
+/// Fails if the panel rejects [`MAX_DROPPED_FRAMES`] writes in a row — typically
+/// the module being unplugged.
 pub fn run_panel(
     label: &'static str,
     mut matrix: impl Matrix,
@@ -57,6 +67,7 @@ pub fn run_panel(
     let mut previous = Instant::now();
     let mut deadline = Instant::now();
     let mut frames: u64 = 0;
+    let mut dropped: u32 = 0;
 
     while !shutdown.load(Ordering::Relaxed) {
         let now = Instant::now();
@@ -66,9 +77,19 @@ pub fn run_panel(
         scene.update(delta);
         canvas.clear();
         scene.render(&mut canvas);
-        matrix
-            .draw(&canvas)
-            .with_context(|| format!("drawing on the {label} panel"))?;
+
+        match matrix.draw(&canvas) {
+            Ok(()) => dropped = 0,
+            Err(error) => {
+                dropped += 1;
+                if dropped >= MAX_DROPPED_FRAMES {
+                    return Err(error).with_context(|| {
+                        format!("the {label} panel dropped {dropped} frames in a row")
+                    });
+                }
+                warn!(panel = label, dropped, ?error, "dropped a frame");
+            }
+        }
 
         frames += 1;
         if frames % FRAME_LOG_INTERVAL == 0 {
@@ -162,13 +183,45 @@ mod tests {
         matrix.expect_set_brightness().returning(|_| Ok(()));
         matrix
             .expect_draw()
+            .times(super::MAX_DROPPED_FRAMES as usize)
             .returning(|_| Err(anyhow!("module unplugged")));
         // The panel is gone, so no clear is attempted.
         matrix.expect_clear().never();
 
         let error = run_panel("left", matrix, idle_scene(), 240, 30, &shutdown)
-            .expect_err("a failing write must stop the panel");
+            .expect_err("a module that never accepts a frame must stop the panel");
         assert!(error.to_string().contains("left"), "lost the panel label");
+    }
+
+    #[test]
+    fn a_usb_hiccup_does_not_take_the_panel_down() {
+        // The modules time out a write now and then, typically just after being
+        // re-enumerated. One bad frame must not end the session.
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let stop = Arc::clone(&shutdown);
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&attempts);
+
+        let mut matrix = MockMatrix::new();
+        matrix.expect_set_brightness().returning(|_| Ok(()));
+        matrix.expect_draw().returning(move |_| {
+            let attempt = counter.fetch_add(1, Ordering::Relaxed);
+            if attempt >= 40 {
+                stop.store(true, Ordering::Relaxed);
+            }
+            // Fail every other frame, forever, without ever failing twice in a
+            // row: the panel should keep going regardless.
+            if attempt % 2 == 0 {
+                Err(anyhow!("Operation timed out"))
+            } else {
+                Ok(())
+            }
+        });
+        matrix.expect_clear().times(1).returning(|| Ok(()));
+
+        run_panel("left", matrix, idle_scene(), 240, 30, &shutdown)
+            .expect("intermittent failures must not stop the panel");
+        assert!(attempts.load(Ordering::Relaxed) > 40);
     }
 
     #[test]
