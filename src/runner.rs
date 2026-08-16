@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::Receiver;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -9,8 +10,34 @@ use anyhow::{Context, Result};
 use tracing::{debug, info, warn};
 
 use crate::canvas::Canvas;
-use crate::device::Matrix;
+use crate::device::{ColorMode, Matrix};
 use crate::scene::Scene;
+
+/// Something the control socket asks of a running panel.
+pub enum Command<S> {
+    /// Show a different scene, in the colour mode that scene wants.
+    SetScene {
+        /// The scene to switch to.
+        scene: S,
+        /// The mode it should be drawn in.
+        mode: ColorMode,
+    },
+    /// Change the panel brightness.
+    SetBrightness(u8),
+}
+
+/// What a panel is set up with, and what the control socket can change.
+#[derive(Clone, Copy, Debug)]
+pub struct PanelSettings {
+    /// Name used in logs and on the socket.
+    pub label: &'static str,
+    /// Frames per second the loop aims for.
+    pub fps: u32,
+    /// Starting brightness.
+    pub brightness: u8,
+    /// Colour mode the panel is opened in.
+    pub mode: ColorMode,
+}
 
 /// Longest delta handed to a scene.
 ///
@@ -61,17 +88,22 @@ const SHUTDOWN_POLL: Duration = Duration::from_millis(100);
 ///
 /// Fails only if the panel cannot be opened at all to begin with. Once running,
 /// a panel that stops responding is reopened rather than abandoned.
-pub fn run_panel<M: Matrix>(
-    label: &'static str,
-    open: impl Fn() -> Result<M>,
-    mut scene: impl Scene,
-    fps: u32,
-    brightness: u8,
+pub fn run_panel<M: Matrix, S: Scene>(
+    settings: PanelSettings,
+    open: impl Fn(ColorMode) -> Result<M>,
+    mut scene: S,
+    commands: &Receiver<Command<S>>,
     shutdown: &Arc<AtomicBool>,
 ) -> Result<()> {
+    let PanelSettings {
+        label,
+        fps,
+        mut brightness,
+        mut mode,
+    } = settings;
     let frame_time = Duration::from_secs_f64(1.0 / f64::from(fps));
 
-    let mut matrix = open().with_context(|| format!("opening the {label} panel"))?;
+    let mut matrix = open(mode).with_context(|| format!("opening the {label} panel"))?;
     matrix
         .set_brightness(brightness)
         .with_context(|| format!("setting brightness on the {label} panel"))?;
@@ -95,6 +127,40 @@ pub fn run_panel<M: Matrix>(
         let delta = (now - previous).min(MAX_FRAME_DELTA);
         previous = now;
 
+        // Drain whatever the control socket asked for since the last frame.
+        while let Ok(command) = commands.try_recv() {
+            match command {
+                Command::SetScene {
+                    scene: next,
+                    mode: wanted,
+                } => {
+                    scene = next;
+                    info!(panel = label, scene = scene.name(), "scene changed");
+
+                    // The colour mode is chosen when the port is opened, so a
+                    // scene that wants the other one needs a fresh panel.
+                    if wanted != mode {
+                        mode = wanted;
+                        match open(mode).and_then(|mut fresh| {
+                            fresh.set_brightness(brightness)?;
+                            Ok(fresh)
+                        }) {
+                            Ok(fresh) => matrix = fresh,
+                            Err(error) => {
+                                warn!(panel = label, ?error, "could not switch colour mode");
+                            }
+                        }
+                    }
+                }
+                Command::SetBrightness(level) => {
+                    brightness = level;
+                    if let Err(error) = matrix.set_brightness(level) {
+                        warn!(panel = label, ?error, "could not set brightness");
+                    }
+                }
+            }
+        }
+
         scene.update(delta);
         canvas.clear();
         scene.render(&mut canvas);
@@ -107,7 +173,7 @@ pub fn run_panel<M: Matrix>(
 
                 if dropped >= MAX_DROPPED_FRAMES {
                     warn!(panel = label, "panel stopped responding, reopening");
-                    let Some(fresh) = reopen(label, &open, brightness, shutdown) else {
+                    let Some(fresh) = reopen(label, &open, mode, brightness, shutdown) else {
                         break;
                     };
                     matrix = fresh;
@@ -150,7 +216,8 @@ pub fn run_panel<M: Matrix>(
 /// instead of retrying into a process that is trying to exit.
 fn reopen<M: Matrix>(
     label: &'static str,
-    open: &impl Fn() -> Result<M>,
+    open: &impl Fn(ColorMode) -> Result<M>,
+    mode: ColorMode,
     brightness: u8,
     shutdown: &Arc<AtomicBool>,
 ) -> Option<M> {
@@ -162,7 +229,7 @@ fn reopen<M: Matrix>(
             break;
         }
 
-        match open().and_then(|mut matrix| {
+        match open(mode).and_then(|mut matrix| {
             matrix.set_brightness(brightness)?;
             Ok(matrix)
         }) {
@@ -199,12 +266,28 @@ fn wait(total: Duration, shutdown: &Arc<AtomicBool>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_DROPPED_FRAMES, run_panel};
-    use crate::device::MockMatrix;
+    use super::{Command, MAX_DROPPED_FRAMES, PanelSettings, run_panel};
+    use crate::device::{ColorMode, MockMatrix};
     use crate::scene::MockScene;
     use anyhow::{Result, anyhow};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::mpsc::{Receiver, Sender, channel};
+
+    /// The settings every test below shares; 240 fps keeps them quick.
+    fn settings(label: &'static str, brightness: u8) -> PanelSettings {
+        PanelSettings {
+            label,
+            fps: 240,
+            brightness,
+            mode: ColorMode::Bw,
+        }
+    }
+
+    /// A command channel whose sending half is kept alive for the test.
+    fn idle_commands() -> (Sender<Command<MockScene>>, Receiver<Command<MockScene>>) {
+        channel()
+    }
 
     /// A scene that does nothing, cheaply.
     fn idle_scene() -> MockScene {
@@ -216,9 +299,9 @@ mod tests {
     }
 
     /// Hands the loop one prepared panel, then refuses to open another.
-    fn once(matrix: MockMatrix) -> impl Fn() -> Result<MockMatrix> {
+    fn once(matrix: MockMatrix) -> impl Fn(ColorMode) -> Result<MockMatrix> {
         let cell = std::sync::Mutex::new(Some(matrix));
-        move || {
+        move |_mode| {
             cell.lock()
                 .expect("lock")
                 .take()
@@ -246,7 +329,15 @@ mod tests {
         });
         matrix.expect_clear().times(1).returning(|| Ok(()));
 
-        run_panel("left", once(matrix), idle_scene(), 240, 30, &shutdown).expect("clean shutdown");
+        let (_keep, commands) = idle_commands();
+        run_panel(
+            settings("left", 30),
+            once(matrix),
+            idle_scene(),
+            &commands,
+            &shutdown,
+        )
+        .expect("clean shutdown");
         assert_eq!(drawn.load(Ordering::Relaxed), 3);
     }
 
@@ -267,16 +358,31 @@ mod tests {
         });
         matrix.expect_clear().returning(|| Ok(()));
 
-        run_panel("right", once(matrix), idle_scene(), 240, 42, &shutdown).expect("clean shutdown");
+        let (_keep, commands) = idle_commands();
+        run_panel(
+            settings("right", 42),
+            once(matrix),
+            idle_scene(),
+            &commands,
+            &shutdown,
+        )
+        .expect("clean shutdown");
     }
 
     #[test]
     fn a_panel_that_cannot_be_opened_at_all_is_an_error() {
         let shutdown = Arc::new(AtomicBool::new(false));
-        let open = || -> Result<MockMatrix> { Err(anyhow!("permission denied")) };
+        let open = |_mode| -> Result<MockMatrix> { Err(anyhow!("permission denied")) };
+        let (_keep, commands) = idle_commands();
 
-        let error = run_panel("left", open, idle_scene(), 240, 30, &shutdown)
-            .expect_err("an unopenable panel must be reported");
+        let error = run_panel(
+            settings("left", 30),
+            open,
+            idle_scene(),
+            &commands,
+            &shutdown,
+        )
+        .expect_err("an unopenable panel must be reported");
         assert!(error.to_string().contains("left"), "lost the panel label");
     }
 
@@ -290,7 +396,7 @@ mod tests {
 
         let stop = Arc::clone(&shutdown);
         let counter = Arc::clone(&opens);
-        let open = move || {
+        let open = move |_mode| {
             // The second open proves the panel was reopened; wind down there.
             if counter.fetch_add(1, Ordering::Relaxed) >= 1 {
                 stop.store(true, Ordering::Relaxed);
@@ -305,7 +411,15 @@ mod tests {
             Ok(matrix)
         };
 
-        run_panel("left", open, idle_scene(), 240, 30, &shutdown).expect("clean shutdown");
+        let (_keep, commands) = idle_commands();
+        run_panel(
+            settings("left", 30),
+            open,
+            idle_scene(),
+            &commands,
+            &shutdown,
+        )
+        .expect("clean shutdown");
         assert!(
             opens.load(Ordering::Relaxed) >= 2,
             "the panel was never reopened"
@@ -340,8 +454,15 @@ mod tests {
 
         // `once` refuses a second panel, so this passing proves no reconnection
         // was attempted.
-        run_panel("left", once(matrix), idle_scene(), 240, 30, &shutdown)
-            .expect("intermittent failures must not stop the panel");
+        let (_keep, commands) = idle_commands();
+        run_panel(
+            settings("left", 30),
+            once(matrix),
+            idle_scene(),
+            &commands,
+            &shutdown,
+        )
+        .expect("intermittent failures must not stop the panel");
         assert!(attempts.load(Ordering::Relaxed) > 40);
     }
 
@@ -354,7 +475,7 @@ mod tests {
         let opens = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&opens);
 
-        let open = move || -> Result<MockMatrix> {
+        let open = move |_mode| -> Result<MockMatrix> {
             if counter.fetch_add(1, Ordering::Relaxed) == 0 {
                 let mut matrix = MockMatrix::new();
                 matrix.expect_set_brightness().returning(|_| Ok(()));
@@ -369,8 +490,16 @@ mod tests {
             Err(anyhow!("still gone"))
         };
 
+        let (_keep, commands) = idle_commands();
         let started = std::time::Instant::now();
-        run_panel("left", open, idle_scene(), 240, 30, &shutdown).expect("clean shutdown");
+        run_panel(
+            settings("left", 30),
+            open,
+            idle_scene(),
+            &commands,
+            &shutdown,
+        )
+        .expect("clean shutdown");
         assert!(
             started.elapsed() < std::time::Duration::from_secs(5),
             "shutdown took {:?}",
@@ -388,7 +517,7 @@ mod tests {
         let opens = Arc::new(AtomicUsize::new(0));
         let open_counter = Arc::clone(&opens);
 
-        let open = move || {
+        let open = move |_mode| {
             if open_counter.fetch_add(1, Ordering::Relaxed) >= 1 {
                 stop.store(true, Ordering::Relaxed);
             }
@@ -403,7 +532,15 @@ mod tests {
             Ok(matrix)
         };
 
-        run_panel("left", open, idle_scene(), 240, 30, &shutdown).expect("clean shutdown");
+        let (_keep, commands) = idle_commands();
+        run_panel(
+            settings("left", 30),
+            open,
+            idle_scene(),
+            &commands,
+            &shutdown,
+        )
+        .expect("clean shutdown");
         assert_eq!(
             draws.load(Ordering::Relaxed),
             MAX_DROPPED_FRAMES as usize,

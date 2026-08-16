@@ -90,6 +90,31 @@ Pick what goes where:
 ledmat --left-scene snake --right-scene off --brightness 60
 ```
 
+## Control it while it runs
+
+The daemon listens on a Unix socket, so scenes can be swapped without a
+restart:
+
+```bash
+ledmat status
+ledmat set left snake
+ledmat brightness 60
+```
+
+`set <panel> off` blanks a panel and keeps its thread — unlike `--left-scene
+off` at startup, which never opens that module at all.
+
+The socket lives at `$XDG_RUNTIME_DIR/ledmat.sock` and speaks one line in, one
+line out, so it is equally usable by hand:
+
+```bash
+echo status | socat - UNIX-CONNECT:$XDG_RUNTIME_DIR/ledmat.sock
+```
+
+Switching scenes can change the colour mode — a game wants `bw`, a widget wants
+`greyscale` — and since the mode is fixed when the serial port is opened, the
+panel is reopened underneath when that happens.
+
 ## Configuration
 
 Every option can be set as a flag or an environment variable. Flags win.
@@ -106,6 +131,7 @@ Every option can be set as a flag or an environment variable. Flags win.
 | `--simulate` | `SIMULATE` | `false` | Draw in the terminal instead of on the modules |
 | `--seed` | `SEED` | — | Seed the scenes for a reproducible run |
 | `--log-filter` | `LOG_FILTER` | `info` | `tracing` filter directive |
+| `--socket` | `SOCKET_PATH` | `$XDG_RUNTIME_DIR/ledmat.sock` | Where the control socket lives |
 
 ## Run it in the background
 
@@ -146,6 +172,8 @@ covers the rest, and the mocked `Matrix` trait covers the render loop.
 | `src/device/terminal.rs` | The terminal preview used by `--simulate` |
 | `src/scene/` | One file per scene |
 | `src/runner.rs` | The fixed-rate loop driving one panel |
+| `src/control.rs` | The socket protocol, shared by both ends |
+| `src/server.rs` | The daemon side of the socket |
 
 ### Adding a scene
 

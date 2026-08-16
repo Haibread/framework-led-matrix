@@ -1,7 +1,10 @@
 //! Command line and environment configuration.
 
-use clap::Parser;
+use std::path::PathBuf;
 
+use clap::{Parser, Subcommand};
+
+use crate::control::PanelName;
 use crate::device::ColorMode;
 use crate::scene::SceneKind;
 
@@ -45,10 +48,42 @@ impl std::fmt::Display for ColorModeChoice {
     }
 }
 
+/// What to ask of a daemon that is already running.
+///
+/// With no subcommand the process becomes the daemon.
+#[derive(Debug, Subcommand)]
+pub enum Command {
+    /// Change what a panel shows
+    Set {
+        /// Which module
+        panel: PanelName,
+        /// What it should show
+        scene: SceneKind,
+    },
+    /// Set the brightness of every panel
+    Brightness {
+        /// 0 to 255
+        level: u8,
+    },
+    /// Report what each panel is showing
+    Status,
+}
+
 /// Drive the Framework 16 LED Matrix modules.
 #[derive(Debug, Parser)]
 #[command(version, about, long_about = None)]
 pub struct Cli {
+    /// Talk to a running daemon instead of becoming one
+    #[command(subcommand)]
+    pub command: Option<Command>,
+
+    /// Control socket the daemon listens on
+    ///
+    /// Defaults to `ledmat.sock` inside `XDG_RUNTIME_DIR`, falling back to the
+    /// current directory when that is unset.
+    #[arg(long, env = "SOCKET_PATH")]
+    pub socket: Option<PathBuf>,
+
     /// Serial device of the left module
     #[arg(long, env = "LEFT_DEVICE", default_value = DEFAULT_LEFT_DEVICE)]
     pub left_device: String,
@@ -100,6 +135,18 @@ pub struct Cli {
     /// Syntax: <https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html#directives>
     #[arg(long = "log-filter", env = "LOG_FILTER", default_value = "info")]
     pub log_filter: String,
+}
+
+impl Cli {
+    /// Where the control socket lives.
+    #[must_use]
+    pub fn socket_path(&self) -> PathBuf {
+        self.socket.clone().unwrap_or_else(|| {
+            std::env::var_os("XDG_RUNTIME_DIR")
+                .map_or_else(|| PathBuf::from("."), PathBuf::from)
+                .join("ledmat.sock")
+        })
+    }
 }
 
 #[cfg(test)]

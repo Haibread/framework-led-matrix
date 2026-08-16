@@ -7,13 +7,20 @@
 
 mod canvas;
 mod cli;
+mod control;
 mod device;
 mod font;
 mod runner;
 mod scene;
+mod server;
 
+use std::collections::HashMap;
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::UnixStream;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::channel;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -22,9 +29,11 @@ use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use cli::Cli;
+use control::{PanelName, Request, Response};
 use device::serial::SerialMatrix;
 use device::terminal::TerminalMatrix;
 use device::{ColorMode, Panel};
+use runner::PanelSettings;
 use scene::{AnyScene, SceneKind};
 
 /// Terminal columns the preview panels are drawn at.
@@ -33,7 +42,7 @@ const RIGHT_PREVIEW_COLUMN: usize = 27;
 
 /// Everything needed to bring one panel up.
 struct PanelSpec {
-    label: &'static str,
+    name: PanelName,
     device: String,
     scene: SceneKind,
     preview_column: usize,
@@ -43,6 +52,10 @@ struct PanelSpec {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    if let Some(command) = &cli.command {
+        return send(&cli.socket_path(), request_for(command));
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::new(&cli.log_filter))
         .with_writer(std::io::stderr)
@@ -50,13 +63,13 @@ async fn main() -> Result<()> {
 
     let specs = [
         PanelSpec {
-            label: "left",
+            name: PanelName::Left,
             device: cli.left_device.clone(),
             scene: cli.left_scene,
             preview_column: LEFT_PREVIEW_COLUMN,
         },
         PanelSpec {
-            label: "right",
+            name: PanelName::Right,
             device: cli.right_device.clone(),
             scene: cli.right_scene,
             preview_column: RIGHT_PREVIEW_COLUMN,
@@ -65,28 +78,40 @@ async fn main() -> Result<()> {
 
     let shutdown = Arc::new(AtomicBool::new(false));
     let mut panels = JoinSet::new();
+    let mut channels = HashMap::new();
+    let mut showing = HashMap::new();
 
     for (index, spec) in specs.into_iter().enumerate() {
         // Offset the seed per panel, or both games play out identically.
         let seed = cli.seed.map(|seed| seed.wrapping_add(index as u64));
         let mode = cli.color_mode.resolve(spec.scene.preferred_color_mode());
+        let label = spec.name.label();
         let Some(scene) = AnyScene::new(spec.scene, seed, mode) else {
-            info!(panel = spec.label, "panel disabled");
+            info!(panel = label, "panel disabled");
             continue;
         };
 
         let stop = Arc::clone(&shutdown);
-        let (label, fps, brightness) = (spec.label, cli.fps, cli.brightness);
+        let settings = PanelSettings {
+            label,
+            fps: cli.fps,
+            brightness: cli.brightness,
+            mode,
+        };
         let (device, column, simulate) = (spec.device, spec.preview_column, cli.simulate);
 
         // A factory, not a ready-made panel: the runner reopens the module when
-        // it stops responding, which is what a suspend or an unplug looks like.
-        let open = move || open_panel(label, &device, column, simulate, mode);
+        // it stops responding, which is what a suspend or an unplug looks like,
+        // and again when a scene needs the other colour mode.
+        let open = move |mode| open_panel(label, &device, column, simulate, mode);
+
+        let (sender, commands) = channel();
+        channels.insert(spec.name, sender);
+        showing.insert(spec.name, spec.scene);
 
         // The serial writes are blocking, so each panel owns a blocking thread
         // rather than pretending to be async.
-        panels
-            .spawn_blocking(move || runner::run_panel(label, open, scene, fps, brightness, &stop));
+        panels.spawn_blocking(move || runner::run_panel(settings, open, scene, &commands, &stop));
     }
 
     if panels.is_empty() {
@@ -94,10 +119,22 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    let socket = cli.socket_path();
+    let control = server::Control::new(channels, showing, cli.color_mode, cli.seed);
+
     tokio::select! {
         () = shutdown_signal() => info!("shutdown signal received"),
         Some(finished) = panels.join_next() => report(finished),
+        result = server::serve(socket.clone(), control) => {
+            if let Err(error) = result {
+                error!(?error, "the control socket stopped");
+            }
+        }
     }
+
+    // Leaving the socket behind would make the next start think a daemon is
+    // already listening until it probes and finds nobody.
+    let _ = std::fs::remove_file(&socket);
 
     shutdown.store(true, Ordering::Relaxed);
     while let Some(finished) = panels.join_next().await {
@@ -130,6 +167,42 @@ fn open_panel(
         )
     })?;
     Ok(Panel::Serial(matrix))
+}
+
+/// Turns a subcommand into the request that goes over the socket.
+fn request_for(command: &cli::Command) -> Request {
+    match *command {
+        cli::Command::Set { panel, scene } => Request::Set { panel, scene },
+        cli::Command::Brightness { level } => Request::Brightness(level),
+        cli::Command::Status => Request::Status,
+    }
+}
+
+/// Sends one request to a running daemon and prints its answer.
+fn send(socket: &Path, request: Request) -> Result<()> {
+    let stream = UnixStream::connect(socket).with_context(|| {
+        format!(
+            "no daemon listening on {} — is ledmat running?",
+            socket.display()
+        )
+    })?;
+
+    let mut writer = &stream;
+    writeln!(writer, "{request}").context("sending the request")?;
+    writer.flush().context("sending the request")?;
+
+    let mut line = String::new();
+    BufReader::new(&stream)
+        .read_line(&mut line)
+        .context("reading the answer")?;
+
+    let response: Response = line.parse()?;
+    if response.succeeded() {
+        println!("{}", response.message());
+        Ok(())
+    } else {
+        anyhow::bail!("{}", response.message())
+    }
 }
 
 /// Logs how a panel thread ended.

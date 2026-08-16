@@ -82,6 +82,8 @@ pub enum AnyScene {
     Pong(Pong),
     /// See [`Snake`].
     Snake(Snake),
+    /// Nothing at all, for a panel switched off while the daemon runs.
+    Blank,
 }
 
 impl AnyScene {
@@ -99,6 +101,16 @@ impl AnyScene {
             SceneKind::Off => None,
         }
     }
+
+    /// Builds the scene for `kind`, blanking the panel for [`SceneKind::Off`].
+    ///
+    /// Off means two different things depending on when it is asked for: at
+    /// startup there is no panel to blank, so none is opened at all, whereas a
+    /// running panel switched off keeps its thread and simply goes dark.
+    #[must_use]
+    pub fn or_blank(kind: SceneKind, seed: Option<u64>, mode: ColorMode) -> Self {
+        Self::new(kind, seed, mode).unwrap_or(Self::Blank)
+    }
 }
 
 impl Scene for AnyScene {
@@ -106,6 +118,7 @@ impl Scene for AnyScene {
         match self {
             Self::Pong(scene) => scene.name(),
             Self::Snake(scene) => scene.name(),
+            Self::Blank => "off",
         }
     }
 
@@ -113,6 +126,7 @@ impl Scene for AnyScene {
         match self {
             Self::Pong(scene) => scene.update(delta),
             Self::Snake(scene) => scene.update(delta),
+            Self::Blank => {}
         }
     }
 
@@ -120,6 +134,7 @@ impl Scene for AnyScene {
         match self {
             Self::Pong(scene) => scene.render(canvas),
             Self::Snake(scene) => scene.render(canvas),
+            Self::Blank => {}
         }
     }
 }
