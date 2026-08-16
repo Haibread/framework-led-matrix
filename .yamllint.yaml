@@ -4,6 +4,11 @@ rules:
   # No `---` opening a file.
   document-start:
     present: false
+  # A GitHub workflow's trigger key is `on:`, which YAML reads as the boolean
+  # true. Writing it quoted to please the linter is worse than telling the
+  # linter to judge values rather than keys — actionlint checks the real thing.
+  truthy:
+    check-keys: false
   # Block style only. `non-empty` still allows `{}` / `[]`.
   braces:
     forbid: non-empty
