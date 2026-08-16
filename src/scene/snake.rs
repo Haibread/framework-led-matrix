@@ -17,8 +17,13 @@ use crate::canvas::{self, Canvas, PIXELS};
 use crate::device::ColorMode;
 use crate::scene::{Scene, rng_from};
 
-/// Time between two moves. Slow enough to follow with your eyes.
-const STEP_INTERVAL: f32 = 0.11;
+/// Time between two moves.
+///
+/// Deliberately unhurried. On a nine-wide one-bit panel the head is just a lit
+/// pixel like any other, so the only thing telling you where the snake is going
+/// is continuity of motion — and at the 110 ms this used to be, the eye keeps
+/// losing it the moment the head passes close to the body.
+const STEP_INTERVAL: f32 = 0.16;
 /// How long the death animation lasts before a new game starts.
 const DEATH_FLASH: f32 = 1.1;
 /// Longest simulated step, so a stalled thread does not fast-forward the game.
@@ -27,11 +32,34 @@ const MAX_STEP: f32 = 0.1;
 /// Moves allowed without eating before the run is declared stuck.
 const STARVATION_LIMIT: u32 = 900;
 
+/// Length at which the run is declared won and a fresh one starts.
+///
+/// Not an arbitrary difficulty knob — it is what keeps the picture readable. The
+/// head is just a lit pixel among others, so the only way to follow it is
+/// continuity, and that breaks down as soon as the head runs alongside the body.
+/// Measured over long runs, how often that happens climbs with length: 2-3% of
+/// moves below twenty cells, 17% at thirty, 43% past eighty. Past that point the
+/// snake reads as a tangle passing through itself, however correct it is.
+const MAX_LENGTH: usize = 20;
+
 const HEAD_LEVEL: u8 = 255;
-/// Blink rates used in black and white, where brightness cannot be used to tell
-/// things apart. Different rates so the head and the food never look alike.
-const HEAD_BLINK_HZ: f32 = 7.0;
-const FOOD_BLINK_HZ: f32 = 3.0;
+
+/// Rate and duty cycle of the food's twinkle in black and white.
+///
+/// The body is never blinked, only the food, and even then it stays lit most of
+/// the time. Blinking a pixel that is part of the snake costs more than it buys:
+/// the head used to blink at 7 Hz to mark it, which hid it for longer than the
+/// 110 ms it takes to move, so it kept reappearing a cell or two away — on a
+/// coiled snake that reads as the head walking through its own body. Direction
+/// is legible from movement; a strobing body is not legible at all.
+const FOOD_BLINK_HZ: f32 = 1.5;
+const FOOD_DUTY: f32 = 0.75;
+
+/// Toggles per second of the death flash. Slow enough to read as an event
+/// rather than as a fault.
+const DEATH_FLASH_HZ: f32 = 5.0;
+/// Toggles per second when the run is won: calmer, so the two read differently.
+const WIN_FLASH_HZ: f32 = 2.0;
 const BODY_BRIGHTEST: u32 = 190;
 const BODY_DIMMEST: u32 = 45;
 
@@ -85,6 +113,8 @@ enum Phase {
     Playing,
     /// The snake died; flashing before the next game.
     Dying(f32),
+    /// The snake reached [`MAX_LENGTH`]; celebrating before the next game.
+    Won(f32),
 }
 
 /// A self-playing game of Snake.
@@ -164,7 +194,7 @@ impl Snake {
 
         if free.is_empty() {
             // The board is full: a perfect game. Celebrate, then start over.
-            self.phase = Phase::Dying(DEATH_FLASH);
+            self.phase = Phase::Won(DEATH_FLASH);
             return;
         }
 
@@ -216,6 +246,10 @@ impl Snake {
 
         if eats {
             self.hunger = 0;
+            if self.body.len() >= MAX_LENGTH {
+                self.phase = Phase::Won(DEATH_FLASH);
+                return;
+            }
             self.place_food();
         } else {
             self.hunger += 1;
@@ -237,19 +271,70 @@ impl Snake {
             .or_else(|| self.most_open_move())
     }
 
-    /// The first step of a path to the food that does not trap the snake.
+    /// The best safe move toward the food.
+    ///
+    /// Ranked by safety, then by path length, then by how much the move would
+    /// run alongside the snake's own body. That last term is not strategy for
+    /// its own sake: on a one-bit panel a head sitting against the body merges
+    /// into it, and when it emerges a few cells later it reads as having gone
+    /// straight through. Measured on a long run, the head used to end up against
+    /// its own body on 17% of moves. Avoiding it also happens to be better play,
+    /// since hugging yourself closes off space.
     fn safe_path_to_food(&self) -> Option<Direction> {
+        let head = self.head();
         let mut blocked = self.occupied;
         // By the time the snake gets there, the tail will have moved on.
         if let Some(index) = self.body.back().copied().and_then(slot) {
             blocked[index] = false;
         }
 
-        let path = search(self.head(), self.food, &blocked)?;
-        if !self.survives(&path) {
-            return None;
+        let mut best: Option<(usize, usize, Direction)> = None;
+
+        for direction in Direction::ALL {
+            let next = head.shifted(direction);
+            let eats = next == self.food;
+            if !self.is_free(next, !eats) {
+                continue;
+            }
+
+            // The whole path this move commits to, so the safety check below
+            // judges the same thing the snake would actually walk.
+            let mut path = vec![next];
+            if !eats {
+                let Some(rest) = search(next, self.food, &blocked) else {
+                    continue;
+                };
+                path.extend(rest);
+            }
+
+            if !self.survives(&path) {
+                continue;
+            }
+
+            let candidate = (path.len(), self.hugs(next), direction);
+            if best.is_none_or(|(length, hugs, _)| (candidate.0, candidate.1) < (length, hugs)) {
+                best = Some(candidate);
+            }
         }
-        direction_between(self.head(), *path.first()?)
+
+        best.map(|(_, _, direction)| direction)
+    }
+
+    /// How many of its own segments the snake would sit against at `cell`.
+    ///
+    /// The neck does not count: the head is always against that one.
+    fn hugs(&self, cell: Cell) -> usize {
+        self.hugs_excluding_neck(cell, self.head())
+    }
+
+    /// Segments adjacent to `cell`, ignoring `neck`.
+    fn hugs_excluding_neck(&self, cell: Cell, neck: Cell) -> usize {
+        Direction::ALL
+            .into_iter()
+            .map(|direction| cell.shifted(direction))
+            .filter(|neighbour| *neighbour != neck)
+            .filter(|neighbour| slot(*neighbour).is_some_and(|index| self.occupied[index]))
+            .count()
     }
 
     /// Whether the snake can still reach its tail after walking `path`.
@@ -360,6 +445,14 @@ impl Scene for Snake {
                     self.phase = Phase::Dying(remaining);
                 }
             }
+            Phase::Won(remaining) => {
+                let remaining = remaining - dt;
+                if remaining <= 0.0 {
+                    self.restart();
+                } else {
+                    self.phase = Phase::Won(remaining);
+                }
+            }
             Phase::Playing => {
                 self.step_timer += dt;
                 while self.step_timer >= STEP_INTERVAL && self.phase == Phase::Playing {
@@ -371,8 +464,15 @@ impl Scene for Snake {
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        if let Phase::Dying(remaining) = self.phase {
-            let lit = canvas::floor_pixel(remaining * 9.0) % 2 == 0;
+        let ending = match self.phase {
+            Phase::Dying(remaining) => Some((remaining, DEATH_FLASH_HZ)),
+            Phase::Won(remaining) => Some((remaining, WIN_FLASH_HZ)),
+            Phase::Playing => None,
+        };
+        if let Some((remaining, rate)) = ending {
+            // Deliberate blinking, unlike anything during play: this one is
+            // announcing that the run ended.
+            let lit = canvas::floor_pixel(remaining * rate) % 2 == 0;
             let level = if lit { 210 } else { 30 };
             for cell in &self.body {
                 canvas.set_max(cell.x, cell.y, level);
@@ -381,30 +481,24 @@ impl Scene for Snake {
         }
 
         // The food has to read differently from the body. Greyscale can pulse
-        // it; black and white only has on and off, so it blinks outright.
+        // it; black and white only has on and off, so it twinkles — mostly lit,
+        // with a short blink.
         let food = match self.mode {
             ColorMode::Greyscale => {
                 canvas::level(0.45f32.mul_add((self.elapsed * 6.0).sin(), 0.55))
             }
-            ColorMode::Bw if blinking(self.elapsed, FOOD_BLINK_HZ) => u8::MAX,
+            ColorMode::Bw if blinking(self.elapsed, FOOD_BLINK_HZ, FOOD_DUTY) => u8::MAX,
             ColorMode::Bw => 0,
         };
         canvas.set_max(self.food.x, self.food.y, food);
 
-        // Same problem for the head. Greyscale separates it from the body by
-        // brightness; thresholding flattens that away, leaving one uniform worm
-        // whose direction you can only infer by watching it move, so in black
-        // and white the head blinks instead.
-        let head = match self.mode {
-            ColorMode::Greyscale => HEAD_LEVEL,
-            ColorMode::Bw if blinking(self.elapsed, HEAD_BLINK_HZ) => HEAD_LEVEL,
-            ColorMode::Bw => 0,
-        };
-
+        // Every segment stays lit, in both modes. Greyscale marks the head by
+        // brightness; black and white does not mark it at all, on purpose. See
+        // [`FOOD_BLINK_HZ`] for why nothing on the snake may blink.
         let length = self.body.len();
         for (index, cell) in self.body.iter().enumerate() {
             let level = if index == 0 {
-                head
+                HEAD_LEVEL
             } else {
                 body_level(index, length)
             };
@@ -413,9 +507,11 @@ impl Scene for Snake {
     }
 }
 
-/// Whether a thing blinking at `hz` is currently lit.
-fn blinking(elapsed: f32, hz: f32) -> bool {
-    canvas::floor_pixel(elapsed * hz) % 2 == 0
+/// Whether something blinking at `hz` is lit, `duty` being the lit share of
+/// each cycle.
+fn blinking(elapsed: f32, hz: f32, duty: f32) -> bool {
+    let phase = (elapsed * hz).rem_euclid(1.0);
+    phase < duty
 }
 
 /// Maps a cell to its index in the occupancy grid.
@@ -501,7 +597,7 @@ fn body_level(index: usize, length: usize) -> u8 {
 mod tests {
     use super::{Cell, Direction, PIXELS, Phase, Snake, body_level, search, slot};
     use crate::canvas::{self, Canvas};
-    use crate::device::ColorMode;
+    use crate::device::{BW_THRESHOLD, ColorMode};
     use crate::scene::Scene;
     use std::time::Duration;
 
@@ -601,23 +697,120 @@ mod tests {
     #[test]
     fn the_robot_survives_long_enough_to_be_worth_watching() {
         // Naive food-chasing bots trap themselves within a few dozen moves;
-        // this is the regression test for the tail-reachability check.
+        // this is the regression test for the tail-reachability check. Runs now
+        // end in a win at MAX_LENGTH, so the bar is that the robot keeps winning
+        // round after round and never once dies.
         for seed in [1u64, 2, 3, 5, 8] {
             let mut snake = Snake::new(Some(seed), ColorMode::Bw);
+            let mut wins = 0;
+
             for step in 0..1_200 {
-                snake.step();
-                assert_eq!(
-                    snake.phase,
-                    Phase::Playing,
-                    "seed {seed} died after {step} moves"
-                );
+                match snake.phase {
+                    Phase::Playing => snake.step(),
+                    Phase::Won(_) => {
+                        wins += 1;
+                        snake.restart();
+                    }
+                    Phase::Dying(_) => {
+                        panic!("seed {seed} died after {step} moves, on win {wins}")
+                    }
+                }
             }
-            assert!(
-                snake.body.len() > 30,
-                "seed {seed} only grew to {}",
-                snake.body.len()
-            );
+
+            assert!(wins >= 2, "seed {seed} only completed {wins} runs");
         }
+    }
+
+    #[test]
+    fn the_snake_stays_a_connected_line_that_never_teleports() {
+        // Absence of duplicate cells is not enough to prove the snake never
+        // crosses itself: a body whose consecutive segments stop touching draws
+        // exactly like one that walked through its own side.
+        let mut snake = Snake::new(Some(3), ColorMode::Bw);
+        let mut previous_head = snake.head();
+        let mut previous_length = snake.body.len();
+        let mut checked = 0;
+
+        for step in 0..4_000 {
+            snake.update(Duration::from_millis(33));
+            // A round ending resets the board, which is a legitimate jump.
+            if snake.phase != Phase::Playing || snake.body.len() < previous_length {
+                previous_head = snake.head();
+                previous_length = snake.body.len();
+                continue;
+            }
+            checked += 1;
+
+            let head = snake.head();
+            let travelled = (head.x - previous_head.x).abs() + (head.y - previous_head.y).abs();
+            assert!(
+                travelled <= 1,
+                "the head jumped {travelled} cells at step {step}"
+            );
+
+            for pair in snake.body.iter().collect::<Vec<_>>().windows(2) {
+                let gap = (pair[0].x - pair[1].x).abs() + (pair[0].y - pair[1].y).abs();
+                assert_eq!(gap, 1, "the body broke apart at step {step}: {pair:?}");
+            }
+
+            let grown = snake.body.len().abs_diff(previous_length);
+            assert!(grown <= 1, "the body changed by {grown} cells at once");
+
+            previous_head = head;
+            previous_length = snake.body.len();
+        }
+
+        // Without this the test would pass by dying on move three and checking
+        // nothing at all.
+        assert!(
+            checked > 3_500,
+            "only {checked} frames were actually checked"
+        );
+    }
+
+    #[test]
+    fn the_head_rarely_ends_up_against_its_own_body() {
+        // Reported twice as "the snake passes through its body". It never does:
+        // on a one-bit panel a head touching a non-consecutive segment merges
+        // into it, so the head disappears into the blob and reappears further
+        // on, which looks exactly like walking through. The AI used to do this
+        // on 17% of moves; ranking safe moves by how much they hug brought it
+        // to 10%, and the rest is corridors where there is no alternative.
+        let mut snake = Snake::new(Some(11), ColorMode::Bw);
+        let mut steps = 0;
+        let mut hugging = 0;
+
+        for _ in 0..1_500 {
+            // Keep going across rounds: the interesting moves are the ones made
+            // by a long snake, and every round grows one.
+            if snake.phase != Phase::Playing {
+                snake.restart();
+                continue;
+            }
+            let before = snake.head();
+            snake.step();
+            if snake.phase != Phase::Playing {
+                continue;
+            }
+            let head = snake.head();
+            if head == before {
+                continue;
+            }
+
+            steps += 1;
+            // The neck is excluded, so anything left is a segment it is now
+            // running alongside.
+            if snake.hugs_excluding_neck(head, before) > 0 {
+                hugging += 1;
+            }
+        }
+
+        assert!(steps > 1_000, "only {steps} moves were observed");
+        let percent = 100 * hugging / steps;
+        assert!(
+            percent <= 12,
+            "the head hugged its own body on {percent}% of moves"
+        );
     }
 
     #[test]
@@ -664,32 +857,61 @@ mod tests {
     }
 
     #[test]
-    fn the_head_blinks_in_black_and_white_but_not_in_greyscale() {
-        // Thresholding flattens the head-to-tail gradient into one uniform worm.
-        // Blinking the head is what puts back the "which end is which" that
-        // brightness was carrying.
-        for (mode, should_blink) in [(ColorMode::Bw, true), (ColorMode::Greyscale, false)] {
+    fn no_part_of_the_snake_ever_blinks_out() {
+        // The bug this pins down was reported as "the snake seems to pass
+        // through its own body". It never did: the head blinked at 7 Hz, which
+        // hid it for longer than the 110 ms it takes to move, so it kept
+        // reappearing a cell or two further on — and on a coiled snake that
+        // looks exactly like walking through yourself.
+        for mode in [ColorMode::Bw, ColorMode::Greyscale] {
             let mut snake = Snake::new(Some(2), mode);
-            let head = snake.head();
 
-            let mut seen_dark = false;
-            for _ in 0..40 {
-                snake.elapsed += 0.05;
+            for frame in 0..400 {
+                snake.update(Duration::from_millis(33));
+                if snake.phase != Phase::Playing {
+                    continue;
+                }
+
                 let mut canvas = Canvas::new();
                 snake.render(&mut canvas);
-                if canvas.get(head.x, head.y) == 0 {
-                    seen_dark = true;
+                for (index, cell) in snake.body.iter().enumerate() {
+                    assert!(
+                        canvas.get(cell.x, cell.y) >= BW_THRESHOLD,
+                        "segment {index} went dark on frame {frame} in {mode}"
+                    );
                 }
             }
-            assert_eq!(seen_dark, should_blink, "wrong head behaviour in {mode}");
         }
     }
 
     #[test]
-    fn blinking_alternates_at_the_requested_rate() {
-        assert!(super::blinking(0.0, 4.0));
-        assert!(!super::blinking(0.30, 4.0), "should be dark a quarter in");
-        assert!(super::blinking(0.55, 4.0), "should be lit again");
+    fn the_food_stays_lit_most_of_the_time() {
+        // A food that is dark half the time is a strobe on a scene made of four
+        // pixels. It should read as a twinkle.
+        let mut snake = Snake::new(Some(2), ColorMode::Bw);
+        let food = snake.food;
+        let mut lit = 0;
+
+        for _ in 0..300 {
+            snake.elapsed += 0.01;
+            let mut canvas = Canvas::new();
+            snake.render(&mut canvas);
+            if canvas.get(food.x, food.y) >= BW_THRESHOLD {
+                lit += 1;
+            }
+        }
+        assert!((200..=280).contains(&lit), "food lit on {lit}/300 frames");
+    }
+
+    #[test]
+    fn blinking_follows_its_duty_cycle() {
+        assert!(super::blinking(0.0, 1.0, 0.75));
+        assert!(
+            super::blinking(0.70, 1.0, 0.75),
+            "still inside the lit share"
+        );
+        assert!(!super::blinking(0.80, 1.0, 0.75), "should be dark");
+        assert!(super::blinking(1.10, 1.0, 0.75), "next cycle, lit again");
     }
 
     #[test]
