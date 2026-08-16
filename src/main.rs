@@ -148,9 +148,16 @@ async fn main() -> Result<()> {
         () = shutdown_signal() => info!("shutdown signal received"),
         Some(finished) = panels.join_next() => report(finished),
         result = server::serve(socket.clone(), control) => {
-            if let Err(error) = result {
-                error!(?error, "the control socket stopped");
+            // Reached only when the socket gives up. The panels are the point
+            // and the socket is a convenience, so losing it must not take them
+            // down with it — which is exactly what an unbindable path used to
+            // do, panels and all.
+            match result {
+                Ok(()) => warn!("the control socket closed"),
+                Err(error) => error!(?error, "the control socket stopped"),
             }
+            shutdown_signal().await;
+            info!("shutdown signal received");
         }
     }
 

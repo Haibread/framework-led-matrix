@@ -42,8 +42,28 @@ const EDGES: [f32; BANDS + 1] = [
     40.0, 80.0, 160.0, 300.0, 550.0, 1_000.0, 1_900.0, 3_500.0, 6_500.0, 11_000.0,
 ];
 
-/// Quietest level shown, in decibels below full scale.
-const FLOOR_DB: f32 = -60.0;
+/// How much audio the capture should hand over at a time.
+const LATENCY_MS: u32 = 40;
+
+/// Range shown, in decibels below the loudest band heard lately.
+///
+/// Fixed against full scale it cannot work for both a quiet room and a hot
+/// microphone: this machine's input sits at -1.7 dBFS, which would peg every
+/// band, while a quiet track would never leave the floor. Scaling against what
+/// is actually being heard is what makes the bars mean something.
+const RANGE_DB: f32 = 34.0;
+
+/// Below this, a band counts as silent whatever the reference is.
+const SILENCE_DB: f32 = -70.0;
+
+/// How fast the reference falls when things go quiet, in decibels a second.
+///
+/// Slow enough that a pause between two notes does not wind the gain up and
+/// turn the room noise into a light show.
+const REFERENCE_FALL: f32 = 9.0;
+
+/// Quietest reference the gain will scale against.
+const REFERENCE_FLOOR: f32 = -45.0;
 
 /// How quickly a bar rises and falls, as a share of the gap per frame.
 ///
@@ -113,6 +133,7 @@ impl Listener {
 
 impl Drop for Listener {
     fn drop(&mut self) {
+        debug!("listener dropped");
         self.stop.store(true, Ordering::Relaxed);
         // The reader is blocked on the pipe, and silence can keep it there for
         // a long time; killing the child is what actually wakes it.
@@ -137,14 +158,28 @@ fn capture(
             "--format=s16le",
             &format!("--rate={SAMPLE_RATE}"),
             "--channels=1",
+            // Without this the capture buffers about two seconds and then
+            // hands them over at once: the analysis runs a thousand times in a
+            // few milliseconds, every window smears into the next, and what
+            // reaches the panel is two seconds stale.
+            &format!("--latency-msec={LATENCY_MS}"),
         ])
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()?;
 
     let Some(mut output) = child.stdout.take() else {
         return Ok(());
     };
+    if let Some(mut errors) = child.stderr.take() {
+        std::thread::spawn(move || {
+            let mut text = String::new();
+            let _ = errors.read_to_string(&mut text);
+            if !text.trim().is_empty() {
+                warn!(message = text.trim(), "the capture complained");
+            }
+        });
+    }
     if let Ok(mut slot) = holder.lock() {
         *slot = Some(child);
     }
@@ -155,9 +190,20 @@ fn capture(
 
     let mut raw = vec![0u8; WINDOW * 2];
     let mut smoothed = [0.0f32; BANDS];
+    let mut gain = Gain::default();
+    // One window's worth of audio, which is what each pass represents however
+    // fast the pipe hands it over.
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "a window length and a sample rate both convert exactly"
+    )]
+    let seconds = WINDOW as f32 / SAMPLE_RATE as f32;
 
     while !stop.load(Ordering::Relaxed) {
-        if output.read_exact(&mut raw).is_err() {
+        if let Err(error) = output.read_exact(&mut raw) {
+            // Losing the capture silently is what made this look like a widget
+            // that simply never lit up.
+            warn!(?error, "the capture stopped sending audio");
             break;
         }
 
@@ -173,7 +219,7 @@ fn capture(
             .iter()
             .map(|value| value.norm())
             .collect();
-        let target = bands_of(&magnitudes, SAMPLE_RATE);
+        let target = gain.apply(bands_of(&magnitudes, SAMPLE_RATE), seconds);
 
         for (level, wanted) in smoothed.iter_mut().zip(target) {
             *level = smooth(*level, wanted);
@@ -225,11 +271,11 @@ pub fn hann(index: usize, width: usize) -> f32 {
     0.5 - 0.5 * (std::f32::consts::TAU * position).cos()
 }
 
-/// Folds a magnitude spectrum into the nine band levels.
+/// Folds a magnitude spectrum into the nine band loudnesses, in decibels.
 #[must_use]
 pub fn bands_of(magnitudes: &[f32], sample_rate: u32) -> [f32; BANDS] {
     if magnitudes.is_empty() {
-        return [0.0; BANDS];
+        return [SILENCE_DB; BANDS];
     }
 
     #[allow(
@@ -247,7 +293,7 @@ pub fn bands_of(magnitudes: &[f32], sample_rate: u32) -> [f32; BANDS] {
         reason = "a window length converts exactly"
     )]
     let scale = magnitudes.len() as f32 / 2.0;
-    let mut levels = [0.0f32; BANDS];
+    let mut levels = [SILENCE_DB; BANDS];
 
     for (band, level) in levels.iter_mut().enumerate() {
         let low = EDGES[band];
@@ -275,22 +321,59 @@ pub fn bands_of(magnitudes: &[f32], sample_rate: u32) -> [f32; BANDS] {
             .iter()
             .copied()
             .fold(0.0f32, f32::max);
-        *level = to_level(peak / scale);
+        *level = to_decibels(peak / scale);
     }
     levels
 }
 
-/// Maps a magnitude onto `0.0..=1.0` through decibels.
+/// A magnitude in decibels relative to full scale.
 ///
 /// Loudness is logarithmic; on a linear scale a quiet passage would not move
 /// the bars at all and a loud one would peg them.
 #[must_use]
-pub fn to_level(magnitude: f32) -> f32 {
+pub fn to_decibels(magnitude: f32) -> f32 {
     if magnitude <= 0.0 {
-        return 0.0;
+        return SILENCE_DB;
     }
-    let decibels = 20.0 * magnitude.log10();
-    ((decibels - FLOOR_DB) / -FLOOR_DB).clamp(0.0, 1.0)
+    (20.0 * magnitude.log10()).max(SILENCE_DB)
+}
+
+/// Scales loudness against what is actually being heard.
+///
+/// A fixed scale cannot serve a saturated microphone and a quiet track at once,
+/// so the top of the display follows the loudest band heard lately and falls
+/// back slowly when things go quiet.
+#[derive(Clone, Copy, Debug)]
+pub struct Gain {
+    reference: f32,
+}
+
+impl Default for Gain {
+    fn default() -> Self {
+        Self {
+            reference: REFERENCE_FLOOR,
+        }
+    }
+}
+
+impl Gain {
+    /// Follows the loudest of `bands`, then reports each as `0.0..=1.0`.
+    pub fn apply(&mut self, bands: [f32; BANDS], seconds: f32) -> [f32; BANDS] {
+        let loudest = bands.iter().copied().fold(SILENCE_DB, f32::max);
+        self.reference = if loudest >= self.reference {
+            loudest
+        } else {
+            (self.reference - REFERENCE_FALL * seconds).max(loudest.max(REFERENCE_FLOOR))
+        };
+
+        let floor = self.reference - RANGE_DB;
+        bands.map(|decibels| {
+            if decibels <= SILENCE_DB {
+                return 0.0;
+            }
+            ((decibels - floor) / RANGE_DB).clamp(0.0, 1.0)
+        })
+    }
 }
 
 /// Moves a bar towards its target, quickly up and slowly down.
@@ -302,7 +385,7 @@ pub fn smooth(current: f32, target: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{BANDS, EDGES, SAMPLE_RATE, WINDOW, bands_of, hann, samples, smooth, to_level};
+    use super::{BANDS, EDGES, Gain, SAMPLE_RATE, WINDOW, bands_of, hann, samples, smooth};
     use rustfft::FftPlanner;
     use rustfft::num_complex::Complex32;
 
@@ -353,8 +436,58 @@ mod tests {
 
     #[test]
     fn silence_lights_nothing() {
-        let levels = bands_of(&[0.0; WINDOW / 2], SAMPLE_RATE);
+        let mut gain = Gain::default();
+        let levels = gain.apply(bands_of(&[0.0; WINDOW / 2], SAMPLE_RATE), 0.05);
         assert!(levels.iter().all(|level| *level < f32::EPSILON));
+    }
+
+    #[test]
+    fn a_saturated_source_does_not_light_every_band() {
+        // This machine's microphone sits at -1.7 dBFS, which against a fixed
+        // scale pegged all nine columns; the display has to mean something
+        // whatever the input level is.
+        let mut gain = Gain::default();
+        let bands = [-2.0, -30.0, -40.0, -6.0, -50.0, -3.0, -45.0, -60.0, -55.0];
+        let levels = gain.apply(bands, 0.05);
+
+        let lit = levels.iter().filter(|level| **level > 0.8).count();
+        assert!(
+            lit <= 3,
+            "a hot source lit {lit} columns near the top: {levels:?}"
+        );
+        assert!(levels[0] > levels[4], "the loud band is not the tall one");
+    }
+
+    #[test]
+    fn a_quiet_source_still_fills_the_panel() {
+        // The same test the other way round: a quiet track must not sit flat
+        // along the bottom.
+        let mut gain = Gain::default();
+        let bands = [
+            -50.0, -62.0, -66.0, -55.0, -68.0, -52.0, -64.0, -69.0, -67.0,
+        ];
+        // Give the reference time to settle on what it is hearing.
+        let mut levels = [0.0; BANDS];
+        for _ in 0..40 {
+            levels = gain.apply(bands, 0.05);
+        }
+        assert!(levels[0] > 0.5, "the loudest band stayed low: {levels:?}");
+    }
+
+    #[test]
+    fn the_reference_falls_slowly_rather_than_chasing_every_pause() {
+        // Winding the gain up during a rest would turn room noise into a light
+        // show between two notes.
+        let mut gain = Gain::default();
+        let loud = [-2.0; BANDS];
+        gain.apply(loud, 0.05);
+
+        let quiet = [-60.0; BANDS];
+        let after_a_moment = gain.apply(quiet, 0.05);
+        assert!(
+            after_a_moment.iter().all(|level| *level < 0.2),
+            "the gain jumped straight to the quiet passage: {after_a_moment:?}"
+        );
     }
 
     #[test]
@@ -378,19 +511,6 @@ mod tests {
             (hann(0, 1) - 1.0).abs() < f32::EPSILON,
             "no division by zero"
         );
-    }
-
-    #[test]
-    fn levels_are_measured_in_decibels() {
-        assert!(to_level(0.0) < f32::EPSILON, "silence is not a level");
-        assert!(
-            (to_level(1.0) - 1.0).abs() < f32::EPSILON,
-            "full scale is full"
-        );
-        // Halving the amplitude is about 6 dB, a tenth of the sixty on show.
-        let full = to_level(1.0);
-        let half = to_level(0.5);
-        assert!((full - half - 0.1).abs() < 0.02, "{full} then {half}");
     }
 
     #[test]
