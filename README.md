@@ -127,6 +127,22 @@ Switching scenes can change the colour mode — a game wants `bw`, a widget want
 `greyscale` — and since the mode is fixed when the serial port is opened, the
 panel is reopened underneath when that happens.
 
+## It remembers
+
+Whatever `ledmat set` and `ledmat brightness` last applied is written down and
+restored on the next start, so a reboot does not undo an afternoon of fiddling.
+The file is three keys and a comment, meant to be readable:
+
+```
+left=clock
+right=battery
+brightness=45
+```
+
+Anything given explicitly wins over it — a flag, or an environment variable —
+then the saved setup, then the defaults. That order is why the shipped systemd
+unit sets no scene: pinning one there would quietly defeat the whole thing.
+
 ## Configuration
 
 Every option can be set as a flag or an environment variable. Flags win.
@@ -135,15 +151,16 @@ Every option can be set as a flag or an environment variable. Flags win.
 | --- | --- | --- | --- |
 | `--left-device` | `LEFT_DEVICE` | `/dev/led-matrix-left` | Serial device of the left module |
 | `--right-device` | `RIGHT_DEVICE` | `/dev/led-matrix-right` | Serial device of the right module |
-| `--left-scene` | `LEFT_SCENE` | `pong` | `pong`, `snake`, `clock`, `gauges`, `battery` or `off` |
-| `--right-scene` | `RIGHT_SCENE` | `snake` | `pong`, `snake`, `clock`, `gauges`, `battery` or `off` |
-| `--brightness` | `BRIGHTNESS` | `30` | 0 to 255; the modules sit under your hands, past ~80 is a desk lamp |
+| `--left-scene` | `LEFT_SCENE` | saved, else `pong` | `pong`, `snake`, `clock`, `gauges`, `battery` or `off` |
+| `--right-scene` | `RIGHT_SCENE` | saved, else `snake` | `pong`, `snake`, `clock`, `gauges`, `battery` or `off` |
+| `--brightness` | `BRIGHTNESS` | saved, else `30` | 0 to 255; the modules sit under your hands, past ~80 is a desk lamp |
 | `--fps` | `FPS` | `30` | 1 to 60 |
 | `--color-mode` | `COLOR_MODE` | `auto` | `auto` (per scene), `greyscale` (shading, ~6 fps) or `bw` (no shading, ~30 fps) |
 | `--simulate` | `SIMULATE` | `false` | Draw in the terminal instead of on the modules |
 | `--seed` | `SEED` | — | Seed the scenes for a reproducible run |
 | `--log-filter` | `LOG_FILTER` | `info` | `tracing` filter directive |
 | `--socket` | `SOCKET_PATH` | `$XDG_RUNTIME_DIR/ledmat.sock` | Where the control socket lives |
+| `--state` | `STATE_PATH` | `$XDG_STATE_HOME/ledmat/state` | Where the current setup is remembered |
 
 ## Run it in the background
 
@@ -184,6 +201,7 @@ covers the rest, and the mocked `Matrix` trait covers the render loop.
 | `src/device/terminal.rs` | The terminal preview used by `--simulate` |
 | `src/scene/` | One file per scene |
 | `src/system.rs` | Reading the processor, memory and battery |
+| `src/state.rs` | Remembering the setup across restarts |
 | `src/runner.rs` | The fixed-rate loop driving one panel |
 | `src/control.rs` | The socket protocol, shared by both ends |
 | `src/server.rs` | The daemon side of the socket |

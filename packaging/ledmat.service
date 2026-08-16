@@ -6,9 +6,9 @@ After=graphical-session.target
 [Service]
 Type=simple
 ExecStart=%h/.local/bin/ledmat
-Environment=BRIGHTNESS=30
-Environment=LEFT_SCENE=pong
-Environment=RIGHT_SCENE=snake
+# Deliberately no LEFT_SCENE / RIGHT_SCENE / BRIGHTNESS here: anything set
+# would override what `ledmat set` last saved, and the panels would forget
+# their setup on every restart. Set them only to pin a panel for good.
 Environment=LOG_FILTER=info
 # The panels are cleared on SIGTERM; give that a moment to reach the modules.
 KillSignal=SIGTERM

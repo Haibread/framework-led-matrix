@@ -56,6 +56,20 @@ fn the_udev_rule_sorts_before_the_one_that_grants_access() {
 }
 
 #[test]
+fn the_service_does_not_pin_what_the_panels_show() {
+    // The daemon restores whatever `ledmat set` last saved, but only when
+    // nothing was asked for explicitly — and an environment variable counts as
+    // asking. Pinning these in the unit silently defeats the whole feature.
+    let service = fs::read_to_string("packaging/ledmat.service").expect("the unit");
+    for pinned in ["LEFT_SCENE", "RIGHT_SCENE", "BRIGHTNESS"] {
+        assert!(
+            !service.contains(&format!("Environment={pinned}=")),
+            "the unit pins {pinned}, so the saved setup would never be restored"
+        );
+    }
+}
+
+#[test]
 fn the_service_gives_the_panels_time_to_go_dark() {
     // Shutdown clears the panels over a serial link that only drains about 60
     // commands a second. Killing the process too eagerly leaves the LEDs lit.

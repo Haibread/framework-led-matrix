@@ -93,18 +93,28 @@ pub struct Cli {
     pub right_device: String,
 
     /// What to show on the left module
-    #[arg(long, env = "LEFT_SCENE", default_value_t = SceneKind::Pong)]
-    pub left_scene: SceneKind,
+    ///
+    /// Unset, the last scene set through the socket is restored; failing that,
+    /// pong.
+    #[arg(long, env = "LEFT_SCENE")]
+    pub left_scene: Option<SceneKind>,
 
     /// What to show on the right module
-    #[arg(long, env = "RIGHT_SCENE", default_value_t = SceneKind::Snake)]
-    pub right_scene: SceneKind,
+    ///
+    /// Unset, the last scene set through the socket is restored; failing that,
+    /// snake.
+    #[arg(long, env = "RIGHT_SCENE")]
+    pub right_scene: Option<SceneKind>,
 
     /// Panel brightness, 0 to 255
     ///
     /// The modules sit right under your hands: anything past ~80 is a desk lamp.
-    #[arg(long, env = "BRIGHTNESS", default_value_t = 30)]
-    pub brightness: u8,
+    #[arg(long, env = "BRIGHTNESS")]
+    pub brightness: Option<u8>,
+
+    /// File the current setup is remembered in
+    #[arg(long, env = "STATE_PATH")]
+    pub state: Option<PathBuf>,
 
     /// Frames per second
     #[arg(long, env = "FPS", default_value_t = 30, value_parser = clap::value_parser!(u32).range(1..=60))]
@@ -137,7 +147,38 @@ pub struct Cli {
     pub log_filter: String,
 }
 
+/// Scenes used when nothing has been chosen and nothing was saved.
+const DEFAULT_LEFT_SCENE: SceneKind = SceneKind::Pong;
+const DEFAULT_RIGHT_SCENE: SceneKind = SceneKind::Snake;
+/// Brightness used in the same case.
+const DEFAULT_BRIGHTNESS: u8 = 30;
+
 impl Cli {
+    /// Where the saved setup lives.
+    #[must_use]
+    pub fn state_path(&self) -> PathBuf {
+        self.state.clone().unwrap_or_else(crate::state::default_path)
+    }
+
+    /// The scene to start `panel` with.
+    ///
+    /// What was asked for on the command line wins, then what was last set
+    /// through the socket, then the default.
+    #[must_use]
+    pub fn scene_for(&self, panel: PanelName, saved: &crate::state::State) -> SceneKind {
+        let (asked, fallback) = match panel {
+            PanelName::Left => (self.left_scene, DEFAULT_LEFT_SCENE),
+            PanelName::Right => (self.right_scene, DEFAULT_RIGHT_SCENE),
+        };
+        asked.or_else(|| saved.scene(panel)).unwrap_or(fallback)
+    }
+
+    /// The brightness to start with, by the same rule.
+    #[must_use]
+    pub fn brightness_for(&self, saved: &crate::state::State) -> u8 {
+        self.brightness.or(saved.brightness).unwrap_or(DEFAULT_BRIGHTNESS)
+    }
+
     /// Where the control socket lives.
     #[must_use]
     pub fn socket_path(&self) -> PathBuf {
@@ -152,6 +193,7 @@ impl Cli {
 #[cfg(test)]
 mod tests {
     use super::{Cli, ColorModeChoice};
+    use crate::control::PanelName;
     use crate::device::ColorMode;
     use crate::scene::SceneKind;
     use clap::{CommandFactory, Parser};
@@ -162,20 +204,62 @@ mod tests {
     }
 
     #[test]
-    fn defaults_put_pong_on_the_left_and_snake_on_the_right() {
+    fn nothing_is_chosen_until_it_is_asked_for() {
+        // The scenes have to stay unset so a saved setup can fill them in;
+        // a clap default would silently win over what the socket last set.
         let cli = Cli::parse_from(["ledmat"]);
-        assert_eq!(cli.left_scene, SceneKind::Pong);
-        assert_eq!(cli.right_scene, SceneKind::Snake);
+        assert_eq!(cli.left_scene, None);
+        assert_eq!(cli.right_scene, None);
+        assert_eq!(cli.brightness, None);
         assert_eq!(cli.fps, 30);
         assert!(!cli.simulate);
         assert!(cli.seed.is_none());
     }
 
     #[test]
+    fn the_command_line_wins_over_the_saved_setup() {
+        let cli = Cli::parse_from(["ledmat", "--left-scene", "clock", "--brightness", "12"]);
+        let saved = crate::state::State {
+            left: Some(SceneKind::Snake),
+            right: Some(SceneKind::Battery),
+            brightness: Some(99),
+        };
+
+        assert_eq!(cli.scene_for(PanelName::Left, &saved), SceneKind::Clock);
+        assert_eq!(cli.brightness_for(&saved), 12);
+        // Nothing was asked for the right panel, so the saved scene stands.
+        assert_eq!(cli.scene_for(PanelName::Right, &saved), SceneKind::Battery);
+    }
+
+    #[test]
+    fn the_saved_setup_wins_over_the_defaults() {
+        let cli = Cli::parse_from(["ledmat"]);
+        let saved = crate::state::State {
+            left: Some(SceneKind::Gauges),
+            right: None,
+            brightness: Some(7),
+        };
+
+        assert_eq!(cli.scene_for(PanelName::Left, &saved), SceneKind::Gauges);
+        assert_eq!(cli.brightness_for(&saved), 7);
+        // Nothing asked and nothing saved: the default.
+        assert_eq!(cli.scene_for(PanelName::Right, &saved), SceneKind::Snake);
+    }
+
+    #[test]
+    fn a_first_run_falls_back_to_the_defaults() {
+        let cli = Cli::parse_from(["ledmat"]);
+        let empty = crate::state::State::default();
+        assert_eq!(cli.scene_for(PanelName::Left, &empty), SceneKind::Pong);
+        assert_eq!(cli.scene_for(PanelName::Right, &empty), SceneKind::Snake);
+        assert_eq!(cli.brightness_for(&empty), 30);
+    }
+
+    #[test]
     fn scenes_are_selected_by_name() {
         let cli = Cli::parse_from(["ledmat", "--left-scene", "off", "--right-scene", "pong"]);
-        assert_eq!(cli.left_scene, SceneKind::Off);
-        assert_eq!(cli.right_scene, SceneKind::Pong);
+        assert_eq!(cli.left_scene, Some(SceneKind::Off));
+        assert_eq!(cli.right_scene, Some(SceneKind::Pong));
     }
 
     #[test]

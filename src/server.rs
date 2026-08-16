@@ -14,6 +14,7 @@ use crate::cli::ColorModeChoice;
 use crate::control::{PanelName, Request, Response};
 use crate::runner::Command;
 use crate::scene::{AnyScene, SceneKind};
+use crate::state::{self, State};
 
 /// Everything the socket needs to act on a request.
 pub struct Control {
@@ -25,6 +26,9 @@ pub struct Control {
     color_mode: ColorModeChoice,
     /// Seed for scenes built later, so a seeded run stays reproducible.
     seed: Option<u64>,
+    /// What to write back, and where, so a restart picks up where it left.
+    saved: Mutex<State>,
+    state_path: PathBuf,
 }
 
 impl Control {
@@ -35,12 +39,38 @@ impl Control {
         showing: HashMap<PanelName, SceneKind>,
         color_mode: ColorModeChoice,
         seed: Option<u64>,
+        brightness: u8,
+        state_path: PathBuf,
     ) -> Self {
+        let mut saved = State {
+            brightness: Some(brightness),
+            ..State::default()
+        };
+        for (panel, scene) in &showing {
+            saved.set_scene(*panel, *scene);
+        }
+
         Self {
             panels,
             showing: Mutex::new(showing),
             color_mode,
             seed,
+            saved: Mutex::new(saved),
+            state_path,
+        }
+    }
+
+    /// Writes the setup down, so the next start comes up the same.
+    ///
+    /// A failure here costs the memory, not the command that was just carried
+    /// out, so it is logged rather than reported back.
+    fn remember(&self, change: impl FnOnce(&mut State)) {
+        let Ok(mut saved) = self.saved.lock() else {
+            return;
+        };
+        change(&mut saved);
+        if let Err(error) = state::save(&self.state_path, &saved) {
+            warn!(?error, "could not save the setup");
         }
     }
 
@@ -71,6 +101,7 @@ impl Control {
         if let Ok(mut showing) = self.showing.lock() {
             showing.insert(panel, kind);
         }
+        self.remember(|saved| saved.set_scene(panel, kind));
         Response::Ok(format!("{panel} now shows {kind}"))
     }
 
@@ -86,6 +117,7 @@ impl Control {
         if reached == 0 {
             return Response::Error("no panel is running".to_owned());
         }
+        self.remember(|saved| saved.brightness = Some(level));
         Response::Ok(format!("brightness {level} on {reached} panel(s)"))
     }
 
@@ -191,8 +223,20 @@ mod tests {
         let mut showing = HashMap::new();
         showing.insert(PanelName::Left, SceneKind::Pong);
 
+        // A path under the temporary directory: the tests exercise saving, and
+        // must not scribble on the real setup.
+        let state_path = std::env::temp_dir()
+            .join(format!("ledmat-test-{}", std::process::id()))
+            .join("state");
         (
-            Control::new(panels, showing, ColorModeChoice::Auto, Some(1)),
+            Control::new(
+                panels,
+                showing,
+                ColorModeChoice::Auto,
+                Some(1),
+                30,
+                state_path,
+            ),
             receiver,
         )
     }

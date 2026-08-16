@@ -13,6 +13,7 @@ mod font;
 mod runner;
 mod scene;
 mod server;
+mod state;
 mod system;
 
 use std::collections::HashMap;
@@ -62,17 +63,22 @@ async fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
+    // What was asked for wins, then what was saved, then the defaults.
+    let state_path = cli.state_path();
+    let saved = state::load(&state_path);
+    let brightness = cli.brightness_for(&saved);
+
     let specs = [
         PanelSpec {
             name: PanelName::Left,
             device: cli.left_device.clone(),
-            scene: cli.left_scene,
+            scene: cli.scene_for(PanelName::Left, &saved),
             preview_column: LEFT_PREVIEW_COLUMN,
         },
         PanelSpec {
             name: PanelName::Right,
             device: cli.right_device.clone(),
-            scene: cli.right_scene,
+            scene: cli.scene_for(PanelName::Right, &saved),
             preview_column: RIGHT_PREVIEW_COLUMN,
         },
     ];
@@ -96,7 +102,7 @@ async fn main() -> Result<()> {
         let settings = PanelSettings {
             label,
             fps: cli.fps,
-            brightness: cli.brightness,
+            brightness,
             mode,
         };
         let (device, column, simulate) = (spec.device, spec.preview_column, cli.simulate);
@@ -121,7 +127,14 @@ async fn main() -> Result<()> {
     }
 
     let socket = cli.socket_path();
-    let control = server::Control::new(channels, showing, cli.color_mode, cli.seed);
+    let control = server::Control::new(
+        channels,
+        showing,
+        cli.color_mode,
+        cli.seed,
+        brightness,
+        state_path,
+    );
 
     tokio::select! {
         () = shutdown_signal() => info!("shutdown signal received"),

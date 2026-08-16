@@ -90,7 +90,7 @@ impl FromStr for Request {
                 };
                 Ok(Self::Set {
                     panel: panel.parse()?,
-                    scene: parse_scene(scene)?,
+                    scene: scene_from_str(scene)?,
                 })
             }
             Some("brightness") => {
@@ -107,7 +107,10 @@ impl FromStr for Request {
 }
 
 /// Parses a scene name, reusing the spelling the command line accepts.
-fn parse_scene(name: &str) -> Result<SceneKind> {
+///
+/// Public because the saved state writes scenes with `Display` and has to read
+/// them back the same way; one spelling, one parser.
+pub fn scene_from_str(name: &str) -> Result<SceneKind> {
     match name {
         "pong" => Ok(SceneKind::Pong),
         "snake" => Ok(SceneKind::Snake),
