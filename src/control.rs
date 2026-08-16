@@ -162,11 +162,12 @@ pub fn scene_from_str(name: &str) -> Result<SceneKind> {
         "disk" => Ok(SceneKind::Disk),
         "volume" => Ok(SceneKind::Volume),
         "media" => Ok(SceneKind::Media),
+        "spectrum" => Ok(SceneKind::Spectrum),
         "battery" => Ok(SceneKind::Battery),
         "off" => Ok(SceneKind::Off),
         other => {
             bail!(
-                "unknown scene {other:?}, expected pong, snake, tetris, clock, cpu, ram, net, disk, volume, media, battery or off"
+                "unknown scene {other:?}, expected pong, snake, tetris, clock, cpu, ram, net, disk, volume, media, spectrum, battery or off"
             )
         }
     }

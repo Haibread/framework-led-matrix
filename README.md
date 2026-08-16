@@ -56,6 +56,7 @@ everything but the peak a single row tall.
 - Rust 1.97.1 (pinned in `rust-toolchain.toml`)
 - A Framework 16 with at least one LED Matrix module
 - `pre-commit` and `actionlint` for the git hooks
+- `wpctl` and `parec` at runtime, for the `volume` and `spectrum` widgets
 
 No system libraries are needed to build: the serial dependency's `libudev`
 feature is off, since the modules are opened by path and never enumerated.

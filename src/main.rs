@@ -5,6 +5,7 @@
 //! main task does nothing but wait for a signal and then stop the panels
 //! cleanly, so the LEDs never stay lit after the process exits.
 
+mod audio;
 mod canvas;
 mod cli;
 mod control;
