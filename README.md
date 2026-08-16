@@ -9,7 +9,7 @@ pixels, so a scene can be anything you can draw — the firmware's built-in
 patterns are not involved.
 
 Widgets adapt to the room they are given. A panel shows a stack of one or more
-scenes — `clock,gauges,battery` — and each declares the rows it needs, then
+scenes — `clock,cpu,battery` — and each declares the rows it needs, then
 draws differently depending on what it gets. A clock alone takes the whole
 panel and uses a 4x7 face; the same clock in a stack of three falls back to 3x5
 and drops its seconds bar. One implementation, both renderings.
@@ -18,7 +18,7 @@ Colour mode is a property of the scene, not a global setting: a game wants
 motion and takes black and white, while a widget that changes once a second can
 afford the shading. `--color-mode` overrides that per run.
 
-Five scenes ship today. Two games, playing on their own:
+Eight scenes ship today. Three games, playing on their own:
 
 - **pong** — two robot paddles with capped speed, a reaction delay and a fresh
   aiming error each exchange, so rallies end in actual points instead of running
@@ -26,17 +26,30 @@ Five scenes ship today. Two games, playing on their own:
 - **snake** — plans a path to the food, simulates walking it, and only commits
   if it can still reach its own tail afterwards. When nothing is safe it chases
   its tail until the board opens up.
+- **tetris** — tries every rotation in every column, drops the piece and scores
+  the well it would leave behind. Buried holes weigh heaviest, because they are
+  what actually ends a game; a bot that only chased line clears would top out in
+  under a minute.
 
-And three widgets, which read the machine rather than play:
+And five widgets, which read the machine rather than play. Each takes what it is
+given and shows more detail with more rows:
 
-- **clock** — hours stacked over minutes, since two 3-pixel digits and a gap
-  come to seven and `HH:MM` never would. The separator blinks on the second and
-  a bar along the bottom fills over the minute.
-- **gauges** — processor and memory load as two columns filling from the
-  bottom, with quarter marks down the gutter between them.
-- **battery** — charge level inside a drawn battery, because on a panel with no
-  labels the shape is what says which number you are looking at. A wave climbs
-  the fill while it charges.
+| Scene | Least it needs | What it does with more |
+| --- | --- | --- |
+| `clock` | 11 rows | 4x7 digits from 15 rows, a seconds bar from 17 |
+| `cpu` | 3 rows | the figure itself from 6 rows, a sliding history from 11 |
+| `ram` | 3 rows | the same, one shade dimmer so the two read apart |
+| `net` | 7 rows | out above the rule, in below; deeper histories with room |
+| `disk` | 7 rows | the same grammar as `net`: two widgets, one thing to learn |
+| `battery` | 5 rows | stands upright from 20 rows instead of lying down |
+| `off` | — | nothing; blanks a panel without stopping its thread |
+
+`cpu,ram` composes exactly what a combined gauge would draw, so there is no
+separate widget for it — the stack does the composing.
+
+Network and disk are on a logarithmic scale: traffic spans six orders of
+magnitude between a keepalive and a download, and a linear scale would leave
+everything but the peak a single row tall.
 
 ## Requirements
 
@@ -115,7 +128,7 @@ restart:
 ```bash
 ledmat status
 ledmat set left clock
-ledmat set right clock,gauges,battery
+ledmat set right clock,cpu,battery
 ledmat brightness 60
 ```
 
