@@ -30,10 +30,13 @@ Two scenes ship today, both playing on their own:
 ## Install
 
 ```bash
-cargo install --path .
+cargo install --path . --root ~/.local
 ```
 
-The binary is called `ledmat`.
+The binary is called `ledmat`, and lands in `~/.local/bin` — which is on `PATH`
+on most desktop setups, and is where the systemd unit below expects it. Plain
+`cargo install --path .` puts it in `~/.cargo/bin` instead, which is often not
+on `PATH` at all; if you prefer that, point `ExecStart` at it.
 
 ### Device permissions
 
@@ -106,7 +109,7 @@ Every option can be set as a flag or an environment variable. Flags win.
 A user unit is provided:
 
 ```bash
-cargo install --path .
+cargo install --path . --root ~/.local
 mkdir -p ~/.config/systemd/user
 cp packaging/ledmat.service ~/.config/systemd/user/
 systemctl --user enable --now ledmat.service
