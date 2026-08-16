@@ -10,6 +10,7 @@ mod cli;
 mod control;
 mod device;
 mod font;
+mod poller;
 mod runner;
 mod scene;
 mod server;

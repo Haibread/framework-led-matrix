@@ -21,6 +21,7 @@ serialport = { version = "4.9.0", default-features = false }
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "signal", "sync", "net", "io-util"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+zbus = { version = "5.13.2", default-features = false, features = ["blocking-api", "tokio"] }
 
 [dev-dependencies]
 mockall = "0.15.0"

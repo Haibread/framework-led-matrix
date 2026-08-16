@@ -328,39 +328,44 @@ impl Tetris {
         )
     }
 
-    /// Moves the piece one step towards the plan, then one row down.
+    /// Turns, slides and falls, all in the same step.
     ///
-    /// Turning and sliding before falling is what makes this read as a player
-    /// rather than as pieces materialising in place.
+    /// Doing one of the three per step made the piece finish every manoeuvre on
+    /// the top row and then drop in a straight line, which reads as a machine
+    /// placing blocks. A player moves a piece while it is falling, so the piece
+    /// drifts diagonally towards where it is going.
     fn step(&mut self) {
-        if self.piece.rotation != self.plan.rotation {
+        let mut next = self.piece;
+
+        if next.rotation != self.plan.rotation {
             let turned = Piece {
                 rotation: self.plan.rotation,
-                ..self.piece
+                ..next
             };
             if !self.collides(turned) {
-                self.piece = turned;
-                return;
+                next = turned;
             }
         }
 
-        if self.piece.x != self.plan.x {
-            let direction = if self.plan.x > self.piece.x { 1 } else { -1 };
+        if next.x != self.plan.x {
+            let direction = if self.plan.x > next.x { 1 } else { -1 };
             let moved = Piece {
-                x: self.piece.x + direction,
-                ..self.piece
+                x: next.x + direction,
+                ..next
             };
             if !self.collides(moved) {
-                self.piece = moved;
-                return;
+                next = moved;
             }
         }
 
         let dropped = Piece {
-            y: self.piece.y + 1,
-            ..self.piece
+            y: next.y + 1,
+            ..next
         };
         if self.collides(dropped) {
+            // Keep the sideways move even when the fall is blocked: it is the
+            // last chance to slot into a gap beside the stack.
+            self.piece = next;
             self.land();
         } else {
             self.piece = dropped;
@@ -634,6 +639,35 @@ mod tests {
             }
             assert!(top_outs < 40, "seed {seed} topped out {top_outs} times");
         }
+    }
+
+    #[test]
+    fn a_piece_moves_sideways_while_it_falls() {
+        // Reported as "the pieces do not move in the air": turning and sliding
+        // used to happen on the top row, and the piece then dropped straight
+        // down. It should drift towards its column on the way.
+        let mut game = game(4);
+        let mut moved_while_falling = false;
+
+        for _ in 0..600 {
+            if game.phase != Phase::Falling {
+                play(&mut game, 1);
+                continue;
+            }
+            let before = (game.piece.x, game.piece.y, game.piece.rotation);
+            game.step();
+            if game.phase != Phase::Falling {
+                continue;
+            }
+            let after = (game.piece.x, game.piece.y, game.piece.rotation);
+
+            // Fell a row and changed column or rotation in the same step.
+            if after.1 == before.1 + 1 && (after.0 != before.0 || after.2 != before.2) {
+                moved_while_falling = true;
+                break;
+            }
+        }
+        assert!(moved_while_falling, "every piece fell in a straight line");
     }
 
     #[test]

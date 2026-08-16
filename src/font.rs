@@ -48,6 +48,96 @@ const DIGITS: [[u8; 5]; 10] = [
     [0b111, 0b101, 0b111, 0b001, 0b111],
 ];
 
+/// Row bitmaps for `A` to `Z`, in the small face.
+///
+/// Three pixels wide is tight for letters — `M` and `N` lean on the same trick
+/// of filling the middle column — but nine columns hold two characters and a
+/// gap, and a title has to scroll either way.
+const LETTERS: [[u8; 5]; 26] = [
+    [0b111, 0b101, 0b111, 0b101, 0b101], // A
+    [0b110, 0b101, 0b110, 0b101, 0b110], // B
+    [0b111, 0b100, 0b100, 0b100, 0b111], // C
+    [0b110, 0b101, 0b101, 0b101, 0b110], // D
+    [0b111, 0b100, 0b111, 0b100, 0b111], // E
+    [0b111, 0b100, 0b111, 0b100, 0b100], // F
+    [0b111, 0b100, 0b101, 0b101, 0b111], // G
+    [0b101, 0b101, 0b111, 0b101, 0b101], // H
+    [0b111, 0b010, 0b010, 0b010, 0b111], // I
+    [0b001, 0b001, 0b001, 0b101, 0b111], // J
+    [0b101, 0b101, 0b110, 0b101, 0b101], // K
+    [0b100, 0b100, 0b100, 0b100, 0b111], // L
+    [0b101, 0b111, 0b111, 0b101, 0b101], // M
+    [0b101, 0b111, 0b111, 0b111, 0b101], // N
+    [0b111, 0b101, 0b101, 0b101, 0b111], // O
+    [0b111, 0b101, 0b111, 0b100, 0b100], // P
+    [0b111, 0b101, 0b101, 0b111, 0b001], // Q
+    [0b111, 0b101, 0b110, 0b101, 0b101], // R
+    [0b111, 0b100, 0b111, 0b001, 0b111], // S
+    [0b111, 0b010, 0b010, 0b010, 0b010], // T
+    [0b101, 0b101, 0b101, 0b101, 0b111], // U
+    [0b101, 0b101, 0b101, 0b101, 0b010], // V
+    [0b101, 0b101, 0b111, 0b111, 0b101], // W
+    [0b101, 0b101, 0b010, 0b101, 0b101], // X
+    [0b101, 0b101, 0b010, 0b010, 0b010], // Y
+    [0b111, 0b001, 0b010, 0b100, 0b111], // Z
+];
+
+/// Distance between the left edges of two neighbouring characters.
+pub const PITCH: i32 = 4;
+
+/// Draws `text` with its top-left corner at `(x, y)`, in the small face.
+///
+/// Only letters and digits are drawn; anything else advances the cursor without
+/// marking the panel, which is what makes a space a space. Drawing is clipped,
+/// so a negative `x` is simply a line mid-scroll.
+pub fn draw_text(canvas: &mut Canvas, text: &str, x: i32, y: i32, value: u8) {
+    for (index, character) in text.chars().enumerate() {
+        let column = x + i32::try_from(index).unwrap_or(0) * PITCH;
+        // Nothing to the left of the panel can show, and once past the right
+        // edge neither can anything after it.
+        if column >= crate::canvas::WIDTH {
+            return;
+        }
+        if column <= -GLYPH_WIDTH {
+            continue;
+        }
+        draw_char(canvas, character, column, y, value);
+    }
+}
+
+/// Draws one character, or nothing if there is no glyph for it.
+fn draw_char(canvas: &mut Canvas, character: char, x: i32, y: i32, value: u8) {
+    let glyph = match character.to_ascii_uppercase() {
+        letter @ 'A'..='Z' => {
+            let index = usize::from(letter as u8 - b'A');
+            LETTERS.get(index).copied()
+        }
+        digit @ '0'..='9' => {
+            let index = usize::from(digit as u8 - b'0');
+            DIGITS.get(index).copied()
+        }
+        _ => None,
+    };
+    let Some(rows) = glyph else {
+        return;
+    };
+
+    for (bits, row) in rows.iter().zip(0..GLYPH_HEIGHT) {
+        for column in 0..GLYPH_WIDTH {
+            if bits & (1u8 << (GLYPH_WIDTH - 1 - column)) != 0 {
+                canvas.set_max(x + column, y + row, value);
+            }
+        }
+    }
+}
+
+/// The width `text` would take, in pixels.
+#[must_use]
+pub fn text_width(text: &str) -> i32 {
+    let characters = i32::try_from(text.chars().count()).unwrap_or(0);
+    (characters * PITCH - 1).max(0)
+}
+
 /// Draws `digit` with its top-left corner at `(x, y)`.
 ///
 /// Values above `9` draw nothing, which keeps callers free of range checks.

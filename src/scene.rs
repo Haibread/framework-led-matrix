@@ -6,10 +6,12 @@
 pub mod battery;
 pub mod clock;
 pub mod load;
+pub mod media;
 pub mod pong;
 pub mod snake;
 pub mod tetris;
 pub mod traffic;
+pub mod volume;
 
 use std::fmt;
 use std::time::Duration;
@@ -22,10 +24,12 @@ use crate::device::ColorMode;
 use battery::BatteryGauge;
 use clock::Clock;
 use load::{Load, Source};
+use media::Media;
 use pong::Pong;
 use snake::Snake;
 use tetris::Tetris;
 use traffic::Traffic;
+use volume::Volume;
 
 /// A horizontal band of the panel, which is all a scene is allowed to touch.
 ///
@@ -107,6 +111,10 @@ pub enum SceneKind {
     Net,
     /// Bytes to and from the disks.
     Disk,
+    /// Output volume, with its muted state.
+    Volume,
+    /// What is playing, over MPRIS.
+    Media,
     /// Charge level, drawn as a battery.
     Battery,
     /// Nothing; the panel stays dark and is left alone.
@@ -131,6 +139,8 @@ impl SceneKind {
             | Self::Ram
             | Self::Net
             | Self::Disk
+            | Self::Volume
+            | Self::Media
             | Self::Battery
             | Self::Off => ColorMode::Greyscale,
         }
@@ -148,6 +158,8 @@ impl fmt::Display for SceneKind {
             Self::Ram => "ram",
             Self::Net => "net",
             Self::Disk => "disk",
+            Self::Volume => "volume",
+            Self::Media => "media",
             Self::Battery => "battery",
             Self::Off => "off",
         };
@@ -177,6 +189,10 @@ pub enum AnyScene {
     Load(Load),
     /// See [`Traffic`].
     Traffic(Traffic),
+    /// See [`Volume`].
+    Volume(Volume),
+    /// See [`Media`].
+    Media(Media),
     /// See [`BatteryGauge`].
     Battery(BatteryGauge),
     /// Nothing at all, for a panel switched off while the daemon runs.
@@ -201,6 +217,8 @@ impl AnyScene {
             SceneKind::Ram => Some(Self::Load(Load::new(Source::Memory, mode))),
             SceneKind::Net => Some(Self::Traffic(Traffic::new(traffic::Source::Network, mode))),
             SceneKind::Disk => Some(Self::Traffic(Traffic::new(traffic::Source::Disk, mode))),
+            SceneKind::Volume => Some(Self::Volume(Volume::new(mode))),
+            SceneKind::Media => Some(Self::Media(Media::new(mode))),
             SceneKind::Battery => Some(Self::Battery(BatteryGauge::new(mode))),
             SceneKind::Off => None,
         }
@@ -244,6 +262,8 @@ impl Scene for AnyScene {
             Self::Clock(scene) => scene.min_height(),
             Self::Load(scene) => scene.min_height(),
             Self::Traffic(scene) => scene.min_height(),
+            Self::Volume(scene) => scene.min_height(),
+            Self::Media(scene) => scene.min_height(),
             Self::Battery(scene) => scene.min_height(),
             Self::Blank => 1,
         }
@@ -257,6 +277,8 @@ impl Scene for AnyScene {
             Self::Clock(scene) => scene.name(),
             Self::Load(scene) => scene.name(),
             Self::Traffic(scene) => scene.name(),
+            Self::Volume(scene) => scene.name(),
+            Self::Media(scene) => scene.name(),
             Self::Battery(scene) => scene.name(),
             Self::Blank => "off",
         }
@@ -270,6 +292,8 @@ impl Scene for AnyScene {
             Self::Clock(scene) => scene.update(delta),
             Self::Load(scene) => scene.update(delta),
             Self::Traffic(scene) => scene.update(delta),
+            Self::Volume(scene) => scene.update(delta),
+            Self::Media(scene) => scene.update(delta),
             Self::Battery(scene) => scene.update(delta),
             Self::Blank => {}
         }
@@ -283,6 +307,8 @@ impl Scene for AnyScene {
             Self::Clock(scene) => scene.render(canvas, area),
             Self::Load(scene) => scene.render(canvas, area),
             Self::Traffic(scene) => scene.render(canvas, area),
+            Self::Volume(scene) => scene.render(canvas, area),
+            Self::Media(scene) => scene.render(canvas, area),
             Self::Battery(scene) => scene.render(canvas, area),
             Self::Blank => {}
         }
