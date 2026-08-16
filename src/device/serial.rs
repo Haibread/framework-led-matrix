@@ -76,30 +76,34 @@ impl SerialMatrix<Port> {
             .with_context(|| format!("opening LED matrix at {path}"))?;
 
         info!(device = path, %mode, "opened LED matrix");
-        let mut matrix = Self::new(port, mode);
-
-        // A sleeping module stops draining its USB buffer, so the first frames
-        // sent to it time out instead of being drawn. Waking it up front turns
-        // that into a single command that may fail rather than a dead panel.
-        if let Err(error) = matrix.wake() {
-            warn!(device = path, ?error, "could not wake the module");
-        }
-
-        Ok(matrix)
+        Ok(Self::new(port, mode))
     }
 }
 
 impl<W: Write> SerialMatrix<W> {
-    /// Wraps a byte sink as a module.
+    /// Wraps a byte sink as a module, waking it up.
+    ///
+    /// The wake happens here rather than in [`Self::open`] so that every way of
+    /// building a module goes through it — including the tests, which is the
+    /// only way to prove it is still being sent.
     fn new(port: W, mode: ColorMode) -> Self {
-        Self {
+        let mut matrix = Self {
             port,
             mode,
             frame: Vec::with_capacity(MAX_COMMAND_LEN),
             // Nothing is known about what the module is showing yet, so the
             // first frame is sent in full.
             displayed: None,
+        };
+
+        // A sleeping module stops draining its USB buffer, so the first frames
+        // sent to it time out instead of being drawn. Waking it up front turns
+        // that into a single command that may fail rather than a dead panel.
+        if let Err(error) = matrix.wake() {
+            warn!(?error, "could not wake the module");
         }
+
+        matrix
     }
 
     /// Tells the module to wake up.
@@ -316,7 +320,7 @@ mod tests {
         // into one write, and staging only the columns that changed. Committing
         // zeroes the firmware's staging buffer, so a frame is all nine columns
         // or it is a strobe.
-        let mut matrix = SerialMatrix::new(Recorder::default(), ColorMode::Greyscale);
+        let mut matrix = matrix(ColorMode::Greyscale);
         matrix.draw(&Canvas::new()).expect("draw into the recorder");
 
         let writes = &matrix.port.writes;
@@ -335,11 +339,30 @@ mod tests {
         assert_eq!(writes[9], [MAGIC[0], MAGIC[1], CMD_COMMIT_COLUMNS]);
     }
 
+    /// A module with the wake-up write already dropped, so the write counts
+    /// below describe only what the test itself triggered.
+    fn matrix(mode: ColorMode) -> SerialMatrix<Recorder> {
+        let mut matrix = SerialMatrix::new(Recorder::default(), mode);
+        matrix.port.writes.clear();
+        matrix
+    }
+
+    #[test]
+    fn a_new_module_is_woken_before_anything_else() {
+        // A module left asleep does not drain its USB buffer, so the first
+        // frames time out instead of being drawn — which used to kill the panel
+        // outright. Nothing else proves this command is still sent.
+        let matrix = SerialMatrix::new(Recorder::default(), ColorMode::Bw);
+
+        let first = matrix.port.writes.first().expect("nothing was sent");
+        assert_eq!(first, &[MAGIC[0], MAGIC[1], CMD_SLEEP, 0]);
+    }
+
     #[test]
     fn a_black_and_white_frame_is_a_single_write() {
         // The entire point of the mode: one command instead of ten, which is
         // what lifts the panel off its ~6 fps ceiling.
-        let mut matrix = SerialMatrix::new(Recorder::default(), ColorMode::Bw);
+        let mut matrix = matrix(ColorMode::Bw);
         matrix.draw(&Canvas::new()).unwrap();
 
         let writes = &matrix.port.writes;
@@ -410,7 +433,7 @@ mod tests {
 
     #[test]
     fn every_write_fits_in_one_firmware_read() {
-        let mut matrix = SerialMatrix::new(Recorder::default(), ColorMode::Greyscale);
+        let mut matrix = matrix(ColorMode::Greyscale);
         matrix.set_brightness(40).unwrap();
         matrix.wake().unwrap();
         matrix.draw(&Canvas::new()).unwrap();
@@ -428,7 +451,7 @@ mod tests {
     fn an_unchanged_frame_is_not_resent() {
         // Worth skipping because the module drains only about 60 commands a
         // second: a still picture should cost nothing.
-        let mut matrix = SerialMatrix::new(Recorder::default(), ColorMode::Greyscale);
+        let mut matrix = matrix(ColorMode::Greyscale);
         let canvas = Canvas::new();
 
         matrix.draw(&canvas).unwrap();
@@ -439,7 +462,7 @@ mod tests {
 
     #[test]
     fn a_one_pixel_change_still_resends_every_column() {
-        let mut matrix = SerialMatrix::new(Recorder::default(), ColorMode::Greyscale);
+        let mut matrix = matrix(ColorMode::Greyscale);
         matrix.draw(&Canvas::new()).unwrap();
 
         let mut moved = Canvas::new();
