@@ -141,15 +141,16 @@ pub fn run_panel<M: Matrix, S: Scene>(
                     // scene that wants the other one needs a fresh panel.
                     if wanted != mode {
                         mode = wanted;
-                        match open(mode).and_then(|mut fresh| {
-                            fresh.set_brightness(brightness)?;
-                            Ok(fresh)
-                        }) {
-                            Ok(fresh) => matrix = fresh,
-                            Err(error) => {
-                                warn!(panel = label, ?error, "could not switch colour mode");
-                            }
-                        }
+                        // The port is opened exclusively, so the handle we are
+                        // holding has to go before another can be taken on the
+                        // same device — otherwise this fails with EBUSY every
+                        // time and the panel keeps the wrong mode.
+                        drop(matrix);
+                        let Some(fresh) = reopen(label, &open, mode, brightness, shutdown) else {
+                            stopped(label, frames);
+                            return Ok(());
+                        };
+                        matrix = fresh;
                     }
                 }
                 Command::SetBrightness(level) => {
@@ -165,7 +166,9 @@ pub fn run_panel<M: Matrix, S: Scene>(
         canvas.clear();
         scene.render(&mut canvas);
 
-        match matrix.draw(&canvas) {
+        // The borrow has to end before the handle can be dropped below.
+        let drawn = matrix.draw(&canvas);
+        match drawn {
             Ok(()) => dropped = 0,
             Err(error) => {
                 dropped += 1;
@@ -173,8 +176,12 @@ pub fn run_panel<M: Matrix, S: Scene>(
 
                 if dropped >= MAX_DROPPED_FRAMES {
                     warn!(panel = label, "panel stopped responding, reopening");
+                    // Same exclusivity rule as a colour-mode switch: a module
+                    // that merely stopped answering still holds its port.
+                    drop(matrix);
                     let Some(fresh) = reopen(label, &open, mode, brightness, shutdown) else {
-                        break;
+                        stopped(label, frames);
+                        return Ok(());
                     };
                     matrix = fresh;
                     dropped = 0;
@@ -206,8 +213,16 @@ pub fn run_panel<M: Matrix, S: Scene>(
             "could not clear the panel on the way out"
         );
     }
-    info!(panel = label, frames, "panel stopped");
+    stopped(label, frames);
     Ok(())
+}
+
+/// Logs a panel winding down.
+///
+/// Also the exit taken when a reopen is abandoned, where the old handle has
+/// already been dropped and there is nothing left to clear.
+fn stopped(label: &'static str, frames: u64) {
+    info!(panel = label, frames, "panel stopped");
 }
 
 /// Reopens a panel, backing off between attempts.
@@ -287,6 +302,21 @@ mod tests {
     /// A command channel whose sending half is kept alive for the test.
     fn idle_commands() -> (Sender<Command<MockScene>>, Receiver<Command<MockScene>>) {
         channel()
+    }
+
+    /// A scene that raises `stop` the first time it is drawn.
+    ///
+    /// Built in one piece rather than by adding an expectation to
+    /// [`idle_scene`]: mockall matches the first expectation that fits, so a
+    /// second `expect_render` would simply never run.
+    fn scene_stopping_after_a_frame(stop: Arc<AtomicBool>) -> MockScene {
+        let mut scene = MockScene::new();
+        scene.expect_name().returning(|| "test");
+        scene.expect_update().returning(|_| ());
+        scene.expect_render().returning(move |_| {
+            stop.store(true, Ordering::Relaxed);
+        });
+        scene
     }
 
     /// A scene that does nothing, cheaply.
@@ -424,6 +454,85 @@ mod tests {
             opens.load(Ordering::Relaxed) >= 2,
             "the panel was never reopened"
         );
+    }
+
+    #[test]
+    fn a_scene_wanting_the_other_colour_mode_reopens_the_panel() {
+        // The mode is fixed when the port is opened, so switching from a game
+        // to a widget needs a new handle — and the old one has to be released
+        // first, because the port is exclusive and a second open would fail.
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let stop = Arc::clone(&shutdown);
+        let modes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = Arc::clone(&modes);
+
+        let open = move |mode| {
+            seen.lock().expect("lock").push(mode);
+            let mut matrix = MockMatrix::new();
+            matrix.expect_set_brightness().returning(|_| Ok(()));
+            matrix.expect_draw().returning(|_| Ok(()));
+            matrix.expect_clear().returning(|| Ok(()));
+            Ok(matrix)
+        };
+
+        let (sender, commands) = channel();
+        sender
+            .send(Command::SetScene {
+                scene: scene_stopping_after_a_frame(stop),
+                mode: ColorMode::Greyscale,
+            })
+            .expect("send");
+
+        run_panel(
+            settings("left", 30),
+            open,
+            idle_scene(),
+            &commands,
+            &shutdown,
+        )
+        .expect("clean shutdown");
+
+        let modes = modes.lock().expect("lock").clone();
+        assert_eq!(
+            modes,
+            vec![ColorMode::Bw, ColorMode::Greyscale],
+            "the panel was not reopened in the new mode"
+        );
+    }
+
+    #[test]
+    fn a_scene_in_the_same_colour_mode_keeps_the_panel() {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let stop = Arc::clone(&shutdown);
+        let opens = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&opens);
+
+        let open = move |_mode| {
+            counter.fetch_add(1, Ordering::Relaxed);
+            let mut matrix = MockMatrix::new();
+            matrix.expect_set_brightness().returning(|_| Ok(()));
+            matrix.expect_draw().returning(|_| Ok(()));
+            matrix.expect_clear().returning(|| Ok(()));
+            Ok(matrix)
+        };
+
+        let (sender, commands) = channel();
+        sender
+            .send(Command::SetScene {
+                scene: scene_stopping_after_a_frame(stop),
+                mode: ColorMode::Bw,
+            })
+            .expect("send");
+
+        run_panel(
+            settings("left", 30),
+            open,
+            idle_scene(),
+            &commands,
+            &shutdown,
+        )
+        .expect("clean shutdown");
+        assert_eq!(opens.load(Ordering::Relaxed), 1, "reopened for nothing");
     }
 
     #[test]

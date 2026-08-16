@@ -3,6 +3,9 @@
 //! A scene is stepped with the elapsed time and asked to draw itself. It knows
 //! nothing about serial ports, frame rates or the other panel.
 
+pub mod battery;
+pub mod clock;
+pub mod gauges;
 pub mod pong;
 pub mod snake;
 
@@ -14,6 +17,9 @@ use rand::rngs::StdRng;
 
 use crate::canvas::Canvas;
 use crate::device::ColorMode;
+use battery::BatteryGauge;
+use clock::Clock;
+use gauges::Gauges;
 use pong::Pong;
 use snake::Snake;
 
@@ -37,6 +43,12 @@ pub enum SceneKind {
     Pong,
     /// Snake, played by a robot that plans ahead.
     Snake,
+    /// The time of day, hours stacked over minutes.
+    Clock,
+    /// Processor and memory load, as two bars.
+    Gauges,
+    /// Charge level, drawn as a battery.
+    Battery,
     /// Nothing; the panel stays dark and is left alone.
     Off,
 }
@@ -52,7 +64,9 @@ impl SceneKind {
     pub fn preferred_color_mode(self) -> ColorMode {
         match self {
             Self::Pong | Self::Snake => ColorMode::Bw,
-            Self::Off => ColorMode::Greyscale,
+            // Widgets change a few times a minute at most, and an unchanged
+            // frame is never resent, so their shading is effectively free.
+            Self::Clock | Self::Gauges | Self::Battery | Self::Off => ColorMode::Greyscale,
         }
     }
 }
@@ -62,6 +76,9 @@ impl fmt::Display for SceneKind {
         let name = match self {
             Self::Pong => "pong",
             Self::Snake => "snake",
+            Self::Clock => "clock",
+            Self::Gauges => "gauges",
+            Self::Battery => "battery",
             Self::Off => "off",
         };
         f.write_str(name)
@@ -82,6 +99,12 @@ pub enum AnyScene {
     Pong(Pong),
     /// See [`Snake`].
     Snake(Snake),
+    /// See [`Clock`].
+    Clock(Clock),
+    /// See [`Gauges`].
+    Gauges(Gauges),
+    /// See [`BatteryGauge`].
+    Battery(BatteryGauge),
     /// Nothing at all, for a panel switched off while the daemon runs.
     Blank,
 }
@@ -98,6 +121,9 @@ impl AnyScene {
         match kind {
             SceneKind::Pong => Some(Self::Pong(Pong::new(seed, mode))),
             SceneKind::Snake => Some(Self::Snake(Snake::new(seed, mode))),
+            SceneKind::Clock => Some(Self::Clock(Clock::new(mode))),
+            SceneKind::Gauges => Some(Self::Gauges(Gauges::new(mode))),
+            SceneKind::Battery => Some(Self::Battery(BatteryGauge::new(mode))),
             SceneKind::Off => None,
         }
     }
@@ -118,6 +144,9 @@ impl Scene for AnyScene {
         match self {
             Self::Pong(scene) => scene.name(),
             Self::Snake(scene) => scene.name(),
+            Self::Clock(scene) => scene.name(),
+            Self::Gauges(scene) => scene.name(),
+            Self::Battery(scene) => scene.name(),
             Self::Blank => "off",
         }
     }
@@ -126,6 +155,9 @@ impl Scene for AnyScene {
         match self {
             Self::Pong(scene) => scene.update(delta),
             Self::Snake(scene) => scene.update(delta),
+            Self::Clock(scene) => scene.update(delta),
+            Self::Gauges(scene) => scene.update(delta),
+            Self::Battery(scene) => scene.update(delta),
             Self::Blank => {}
         }
     }
@@ -134,6 +166,9 @@ impl Scene for AnyScene {
         match self {
             Self::Pong(scene) => scene.render(canvas),
             Self::Snake(scene) => scene.render(canvas),
+            Self::Clock(scene) => scene.render(canvas),
+            Self::Gauges(scene) => scene.render(canvas),
+            Self::Battery(scene) => scene.render(canvas),
             Self::Blank => {}
         }
     }

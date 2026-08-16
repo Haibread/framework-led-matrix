@@ -1,7 +1,7 @@
 # framework-led-matrix
 
 Drives the two LED Matrix input modules of a Framework 16 with self-playing
-games and, in time, widgets.
+games and widgets.
 
 Each module is a 9x34 grid of LEDs with 8-bit brightness per LED, exposed as a
 USB serial device. `ledmat` renders every frame on the host and pushes raw
@@ -12,7 +12,7 @@ Colour mode is a property of the scene, not a global setting: a game wants
 motion and takes black and white, while a widget that changes once a second can
 afford the shading. `--color-mode` overrides that per run.
 
-Two scenes ship today, both playing on their own:
+Five scenes ship today. Two games, playing on their own:
 
 - **pong** — two robot paddles with capped speed, a reaction delay and a fresh
   aiming error each exchange, so rallies end in actual points instead of running
@@ -20,6 +20,17 @@ Two scenes ship today, both playing on their own:
 - **snake** — plans a path to the food, simulates walking it, and only commits
   if it can still reach its own tail afterwards. When nothing is safe it chases
   its tail until the board opens up.
+
+And three widgets, which read the machine rather than play:
+
+- **clock** — hours stacked over minutes, since two 3-pixel digits and a gap
+  come to seven and `HH:MM` never would. The separator blinks on the second and
+  a bar along the bottom fills over the minute.
+- **gauges** — processor and memory load as two columns filling from the
+  bottom, with quarter marks down the gutter between them.
+- **battery** — charge level inside a drawn battery, because on a panel with no
+  labels the shape is what says which number you are looking at. A wave climbs
+  the fill while it charges.
 
 ## Requirements
 
@@ -97,7 +108,8 @@ restart:
 
 ```bash
 ledmat status
-ledmat set left snake
+ledmat set left clock
+ledmat set right gauges
 ledmat brightness 60
 ```
 
@@ -123,8 +135,8 @@ Every option can be set as a flag or an environment variable. Flags win.
 | --- | --- | --- | --- |
 | `--left-device` | `LEFT_DEVICE` | `/dev/led-matrix-left` | Serial device of the left module |
 | `--right-device` | `RIGHT_DEVICE` | `/dev/led-matrix-right` | Serial device of the right module |
-| `--left-scene` | `LEFT_SCENE` | `pong` | `pong`, `snake` or `off` |
-| `--right-scene` | `RIGHT_SCENE` | `snake` | `pong`, `snake` or `off` |
+| `--left-scene` | `LEFT_SCENE` | `pong` | `pong`, `snake`, `clock`, `gauges`, `battery` or `off` |
+| `--right-scene` | `RIGHT_SCENE` | `snake` | `pong`, `snake`, `clock`, `gauges`, `battery` or `off` |
 | `--brightness` | `BRIGHTNESS` | `30` | 0 to 255; the modules sit under your hands, past ~80 is a desk lamp |
 | `--fps` | `FPS` | `30` | 1 to 60 |
 | `--color-mode` | `COLOR_MODE` | `auto` | `auto` (per scene), `greyscale` (shading, ~6 fps) or `bw` (no shading, ~30 fps) |
@@ -171,6 +183,7 @@ covers the rest, and the mocked `Matrix` trait covers the render loop.
 | `src/device/serial.rs` | The wire protocol, over USB CDC |
 | `src/device/terminal.rs` | The terminal preview used by `--simulate` |
 | `src/scene/` | One file per scene |
+| `src/system.rs` | Reading the processor, memory and battery |
 | `src/runner.rs` | The fixed-rate loop driving one panel |
 | `src/control.rs` | The socket protocol, shared by both ends |
 | `src/server.rs` | The daemon side of the socket |
@@ -181,7 +194,9 @@ covers the rest, and the mocked `Matrix` trait covers the render loop.
    `src/scene/<name>.rs`. It gets a cleared canvas and owns nothing else.
 2. Add it to `SceneKind` and `AnyScene` in `src/scene.rs`, and give it a colour
    mode in `SceneKind::preferred_color_mode`. Anything that changes more than a
-   few times a second wants `Bw`.
+   few times a second wants `Bw`; a widget wants `Greyscale`, which costs
+   nothing because an unchanged frame is never resent.
+3. Add its name to `parse_scene` in `src/control.rs` so the socket accepts it.
 
 That is the whole contract — no serial, no timing, no frame budget to think
 about.

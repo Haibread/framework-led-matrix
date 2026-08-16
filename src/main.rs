@@ -13,6 +13,7 @@ mod font;
 mod runner;
 mod scene;
 mod server;
+mod system;
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};

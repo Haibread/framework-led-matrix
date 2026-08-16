@@ -111,8 +111,13 @@ fn parse_scene(name: &str) -> Result<SceneKind> {
     match name {
         "pong" => Ok(SceneKind::Pong),
         "snake" => Ok(SceneKind::Snake),
+        "clock" => Ok(SceneKind::Clock),
+        "gauges" => Ok(SceneKind::Gauges),
+        "battery" => Ok(SceneKind::Battery),
         "off" => Ok(SceneKind::Off),
-        other => bail!("unknown scene {other:?}, expected pong, snake or off"),
+        other => {
+            bail!("unknown scene {other:?}, expected pong, snake, clock, gauges, battery or off")
+        }
     }
 }
 
