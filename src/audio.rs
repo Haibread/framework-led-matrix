@@ -95,8 +95,8 @@ impl Drop for Listener {
         // The reader is blocked on the pipe, and silence can keep it there for
         // a long time; killing the child is what actually wakes it.
         if let Ok(mut child) = self.child.lock() {
-            if let Some(mut running) = child.take() {
-                let _ = running.kill();
+            if let Some(running) = child.take() {
+                reap(running);
             }
         }
     }
@@ -161,11 +161,21 @@ fn capture(
     }
 
     if let Ok(mut slot) = holder.lock() {
-        if let Some(mut running) = slot.take() {
-            let _ = running.kill();
+        if let Some(running) = slot.take() {
+            reap(running);
         }
     }
     Ok(())
+}
+
+/// Kills the capture and collects it.
+///
+/// Killing alone leaves a zombie: the process is gone but its entry stays in
+/// the table until someone reads its status, and switching to this scene and
+/// away again would pile them up one per visit.
+fn reap(mut child: Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// Decodes little-endian signed 16-bit samples into `-1.0..=1.0`.
