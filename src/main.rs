@@ -75,15 +75,18 @@ async fn main() -> Result<()> {
             continue;
         };
 
-        let matrix = open_panel(&spec, cli.simulate, mode)?;
         let stop = Arc::clone(&shutdown);
         let (label, fps, brightness) = (spec.label, cli.fps, cli.brightness);
+        let (device, column, simulate) = (spec.device, spec.preview_column, cli.simulate);
+
+        // A factory, not a ready-made panel: the runner reopens the module when
+        // it stops responding, which is what a suspend or an unplug looks like.
+        let open = move || open_panel(label, &device, column, simulate, mode);
 
         // The serial writes are blocking, so each panel owns a blocking thread
         // rather than pretending to be async.
-        panels.spawn_blocking(move || {
-            runner::run_panel(label, matrix, scene, fps, brightness, &stop)
-        });
+        panels
+            .spawn_blocking(move || runner::run_panel(label, open, scene, fps, brightness, &stop));
     }
 
     if panels.is_empty() {
@@ -105,20 +108,25 @@ async fn main() -> Result<()> {
 }
 
 /// Opens one panel, on hardware or in the terminal.
-fn open_panel(spec: &PanelSpec, simulate: bool, mode: ColorMode) -> Result<Panel> {
+fn open_panel(
+    label: &'static str,
+    device: &str,
+    preview_column: usize,
+    simulate: bool,
+    mode: ColorMode,
+) -> Result<Panel> {
     if simulate {
         return Ok(Panel::Terminal(TerminalMatrix::new(
-            spec.label,
-            spec.preview_column,
+            label,
+            preview_column,
             mode,
         )));
     }
 
-    let matrix = SerialMatrix::open(&spec.device, mode).with_context(|| {
+    let matrix = SerialMatrix::open(device, mode).with_context(|| {
         format!(
-            "opening the {} panel — is the udev rule installed? \
-             Try --simulate to run without hardware",
-            spec.label
+            "opening the {label} panel — is the udev rule installed? \
+             Try --simulate to run without hardware"
         )
     })?;
     Ok(Panel::Serial(matrix))
