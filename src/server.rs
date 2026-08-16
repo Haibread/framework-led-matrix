@@ -69,7 +69,7 @@ impl Control {
             return;
         };
         change(&mut saved);
-        if let Err(error) = state::save(&self.state_path, &saved) {
+        if let Err(error) = state::save(&self.state_path, *saved) {
             warn!(?error, "could not save the setup");
         }
     }

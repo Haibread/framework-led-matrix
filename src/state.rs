@@ -29,7 +29,7 @@ pub struct State {
 impl State {
     /// The scene remembered for `panel`.
     #[must_use]
-    pub fn scene(&self, panel: PanelName) -> Option<SceneKind> {
+    pub fn scene(self, panel: PanelName) -> Option<SceneKind> {
         match panel {
             PanelName::Left => self.left,
             PanelName::Right => self.right,
@@ -47,7 +47,7 @@ impl State {
 
 /// Renders the state as the file's contents.
 #[must_use]
-pub fn format(state: &State) -> String {
+pub fn format(state: State) -> String {
     let mut out = String::from("# Written by ledmat; edit freely, it is read back as is.\n");
     if let Some(scene) = state.left {
         let _ = writeln!(out, "left={scene}");
@@ -80,13 +80,15 @@ pub fn parse(text: &str) -> State {
 
     let scene = |key: &str| -> Option<SceneKind> {
         let raw = pairs.get(key)?;
-        match crate::control::scene_from_str(raw) {
-            Ok(kind) => Some(kind),
-            Err(_) => {
-                warn!(key, value = raw, "ignoring an unknown scene in the saved state");
-                None
-            }
-        }
+        let Ok(kind) = crate::control::scene_from_str(raw) else {
+            warn!(
+                key,
+                value = raw,
+                "ignoring an unknown scene in the saved state"
+            );
+            return None;
+        };
+        Some(kind)
     };
 
     State {
@@ -132,10 +134,9 @@ pub fn load(path: &Path) -> State {
 /// # Errors
 ///
 /// Fails if the directory cannot be created or the file cannot be written.
-pub fn save(path: &Path, state: &State) -> Result<()> {
+pub fn save(path: &Path, state: State) -> Result<()> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     }
 
     // Write beside the target and rename: a crash halfway through then leaves
@@ -164,12 +165,12 @@ mod tests {
 
     #[test]
     fn a_state_survives_a_round_trip() {
-        assert_eq!(parse(&format(&full())), full());
+        assert_eq!(parse(&format(full())), full());
     }
 
     #[test]
     fn an_empty_state_writes_only_a_comment_and_reads_back_empty() {
-        let text = format(&State::default());
+        let text = format(State::default());
         assert!(text.starts_with('#'));
         assert_eq!(parse(&text), State::default());
     }
@@ -211,7 +212,7 @@ mod tests {
         let directory = std::env::temp_dir().join(format!("ledmat-state-{}", std::process::id()));
         let path = directory.join("nested/state");
 
-        save(&path, &full()).expect("save");
+        save(&path, full()).expect("save");
         assert_eq!(load(&path), full(), "the file did not come back");
 
         let _ = std::fs::remove_dir_all(&directory);
@@ -219,6 +220,9 @@ mod tests {
 
     #[test]
     fn loading_a_missing_file_is_not_an_error() {
-        assert_eq!(load(std::path::Path::new("/nonexistent/ledmat")), State::default());
+        assert_eq!(
+            load(std::path::Path::new("/nonexistent/ledmat")),
+            State::default()
+        );
     }
 }

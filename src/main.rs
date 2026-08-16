@@ -66,19 +66,19 @@ async fn main() -> Result<()> {
     // What was asked for wins, then what was saved, then the defaults.
     let state_path = cli.state_path();
     let saved = state::load(&state_path);
-    let brightness = cli.brightness_for(&saved);
+    let brightness = cli.brightness_for(saved);
 
     let specs = [
         PanelSpec {
             name: PanelName::Left,
             device: cli.left_device.clone(),
-            scene: cli.scene_for(PanelName::Left, &saved),
+            scene: cli.scene_for(PanelName::Left, saved),
             preview_column: LEFT_PREVIEW_COLUMN,
         },
         PanelSpec {
             name: PanelName::Right,
             device: cli.right_device.clone(),
-            scene: cli.scene_for(PanelName::Right, &saved),
+            scene: cli.scene_for(PanelName::Right, saved),
             preview_column: RIGHT_PREVIEW_COLUMN,
         },
     ];
