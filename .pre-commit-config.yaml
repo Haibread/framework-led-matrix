@@ -19,6 +19,14 @@ repos:
 
   - repo: local
     hooks:
+      # The upstream hook is Docker-only, so the binary comes from the system:
+      # `pacman -S actionlint`, or the release tarball. CI installs it too.
+      - id: actionlint
+        name: actionlint
+        entry: actionlint
+        language: system
+        files: ^\.github/workflows/.*\.ya?ml$
+
       - id: cargo-fmt
         name: cargo fmt
         entry: cargo fmt --all -- --check

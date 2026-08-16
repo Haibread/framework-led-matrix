@@ -1,0 +1,18 @@
+version: 2
+
+updates:
+  # Actions are pinned by SHA, which is safe but frozen; this is what unfreezes
+  # them, tag comment included.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "ci:"
+
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "deps:"

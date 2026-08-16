@@ -1,0 +1,51 @@
+name: quality
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: pre-commit and tests
+    runs-on: ubuntu-24.04
+    steps:
+      - name: check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      # rust-toolchain.toml pins the version; this is what makes rustup honour it.
+      - name: install the pinned Rust toolchain
+        run: rustup show
+
+      - name: cache the compiled dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+
+      # The pre-commit hooks shell out to real binaries, so every one of them
+      # has to exist before the gate runs.
+      - name: install actionlint
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+        run: |
+          set -euo pipefail
+          url="https://github.com/rhysd/actionlint/releases/download"
+          curl -fsSL "${url}/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin actionlint
+
+      - name: install pre-commit
+        run: pipx install pre-commit
+
+      - name: run every hook
+        run: pre-commit run --all-files --show-diff-on-failure
+
+      # Also run directly, so a failing test reads as a failing test in the UI
+      # rather than as a failing hook.
+      - name: run the test suite
+        run: cargo test --all-targets
