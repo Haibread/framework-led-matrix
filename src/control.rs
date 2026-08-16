@@ -52,15 +52,55 @@ impl FromStr for PanelName {
     }
 }
 
+/// What a panel shows: one scene, or several stacked top to bottom.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SceneSpec(Vec<SceneKind>);
+
+impl SceneSpec {
+    /// The scenes, in the order they are stacked.
+    #[must_use]
+    pub fn scenes(&self) -> &[SceneKind] {
+        &self.0
+    }
+
+    /// A panel showing one scene, which is a stack of one.
+    #[must_use]
+    pub fn single(kind: SceneKind) -> Self {
+        Self(vec![kind])
+    }
+}
+
+impl fmt::Display for SceneSpec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let names: Vec<String> = self.0.iter().map(ToString::to_string).collect();
+        f.write_str(&names.join(","))
+    }
+}
+
+impl FromStr for SceneSpec {
+    type Err = anyhow::Error;
+
+    fn from_str(text: &str) -> Result<Self> {
+        let scenes = text
+            .split(',')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .map(scene_from_str)
+            .collect::<Result<Vec<_>>>()?;
+        anyhow::ensure!(!scenes.is_empty(), "no scene named");
+        Ok(Self(scenes))
+    }
+}
+
 /// Something asked of a running daemon.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {
     /// Show `scene` on `panel`.
     Set {
         /// The module to change.
         panel: PanelName,
-        /// What it should show.
-        scene: SceneKind,
+        /// What it should show, stacked top to bottom.
+        scene: SceneSpec,
     },
     /// Set the brightness of every panel.
     Brightness(u8),
@@ -86,11 +126,11 @@ impl FromStr for Request {
         match words.next() {
             Some("set") => {
                 let (Some(panel), Some(scene)) = (words.next(), words.next()) else {
-                    bail!("set needs a panel and a scene, e.g. `set left snake`");
+                    bail!("set needs a panel and a scene, e.g. `set left clock,cpu`");
                 };
                 Ok(Self::Set {
                     panel: panel.parse()?,
-                    scene: scene_from_str(scene)?,
+                    scene: scene.parse()?,
                 })
             }
             Some("brightness") => {
@@ -175,8 +215,25 @@ impl FromStr for Response {
 
 #[cfg(test)]
 mod tests {
-    use super::{PanelName, Request, Response};
+    use super::{PanelName, Request, Response, SceneSpec};
     use crate::scene::SceneKind;
+
+    #[test]
+    fn a_stack_survives_a_round_trip() {
+        // The spec is what the socket, the command line and the saved state all
+        // speak, so one spelling has to serve all three.
+        let spec: SceneSpec = "clock,gauges,battery".parse().expect("parse");
+        assert_eq!(spec.scenes().len(), 3);
+        assert_eq!(spec.to_string(), "clock,gauges,battery");
+        assert_eq!(spec.to_string().parse::<SceneSpec>().unwrap(), spec);
+    }
+
+    #[test]
+    fn a_spec_with_no_scene_is_refused() {
+        assert!("".parse::<SceneSpec>().is_err());
+        assert!(",,".parse::<SceneSpec>().is_err());
+        assert!("clock,tetris".parse::<SceneSpec>().is_err());
+    }
 
     #[test]
     fn requests_survive_a_round_trip() {
@@ -185,11 +242,11 @@ mod tests {
         for request in [
             Request::Set {
                 panel: PanelName::Left,
-                scene: SceneKind::Snake,
+                scene: SceneSpec::single(SceneKind::Snake),
             },
             Request::Set {
                 panel: PanelName::Right,
-                scene: SceneKind::Off,
+                scene: SceneSpec::single(SceneKind::Off),
             },
             Request::Brightness(0),
             Request::Brightness(255),
@@ -221,7 +278,7 @@ mod tests {
             parsed,
             Request::Set {
                 panel: PanelName::Left,
-                scene: SceneKind::Pong
+                scene: SceneSpec::single(SceneKind::Pong)
             }
         );
     }

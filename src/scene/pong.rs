@@ -13,7 +13,7 @@ use rand::rngs::StdRng;
 use crate::canvas::{self, Canvas};
 use crate::device::ColorMode;
 use crate::font;
-use crate::scene::{Scene, rng_from};
+use crate::scene::{Area, Scene, rng_from};
 
 // The field is the panel, in pixels, as floats.
 const MAX_X: f32 = 8.0;
@@ -301,6 +301,12 @@ impl Scene for Pong {
         "pong"
     }
 
+    /// The whole panel. A game played on a strip is not the same game, so this
+    /// asks for everything rather than degrading.
+    fn min_height(&self) -> i32 {
+        canvas::HEIGHT
+    }
+
     fn update(&mut self, delta: Duration) {
         let dt = delta.as_secs_f32().min(MAX_STEP);
 
@@ -335,7 +341,7 @@ impl Scene for Pong {
         }
     }
 
-    fn render(&self, canvas: &mut Canvas) {
+    fn render(&self, canvas: &mut Canvas, _area: Area) {
         if matches!(self.phase, Phase::Scored(_)) {
             self.draw_scores(canvas);
             return;
@@ -403,7 +409,7 @@ mod tests {
     use super::{Ball, MAX_X, Phase, Pong, WIN_SCORE, covers, fold, predict_x};
     use crate::canvas::Canvas;
     use crate::device::ColorMode;
-    use crate::scene::Scene;
+    use crate::scene::{Area, Scene};
     use std::time::Duration;
 
     /// A frame at 30 fps.
@@ -542,7 +548,7 @@ mod tests {
         pong.phase = Phase::Scored(1.0);
 
         let mut canvas = Canvas::new();
-        pong.render(&mut canvas);
+        pong.render(&mut canvas, Area::FULL);
 
         assert_eq!(canvas.get(4, 33), 0, "the bottom paddle is still drawn");
         assert_ne!(canvas, Canvas::new(), "the score was not drawn");
@@ -563,7 +569,7 @@ mod tests {
         };
 
         let mut canvas = Canvas::new();
-        pong.render(&mut canvas);
+        pong.render(&mut canvas, Area::FULL);
 
         // Brighter than the midline, which also lives between the paddles.
         let lit = (0..9)
@@ -585,7 +591,7 @@ mod tests {
         };
 
         let mut canvas = Canvas::new();
-        pong.render(&mut canvas);
+        pong.render(&mut canvas, Area::FULL);
 
         assert_eq!(canvas.get(3, 17), canvas.get(4, 17), "not evenly split");
         assert!(canvas.get(3, 17) > 0, "the ball vanished");
@@ -598,7 +604,7 @@ mod tests {
         run(&mut pong, 60);
 
         let mut canvas = Canvas::new();
-        pong.render(&mut canvas);
+        pong.render(&mut canvas, Area::FULL);
 
         let top_lit = (0..9).filter(|x| canvas.get(*x, 0) > 0).count();
         let bottom_lit = (0..9).filter(|x| canvas.get(*x, 33) > 0).count();

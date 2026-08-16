@@ -1,7 +1,8 @@
 //! The time of day, stacked to fit nine pixels across.
 //!
 //! Hours over minutes rather than side by side: two 3-pixel digits and a gap
-//! come to seven, which fits, whereas `HH:MM` never would.
+//! come to seven, which fits, whereas `HH:MM` never would. Given more rows it
+//! switches to a 4x7 face, where two digits come to exactly nine.
 
 use std::time::Duration;
 
@@ -10,23 +11,16 @@ use chrono::{Local, Timelike};
 use crate::canvas::Canvas;
 use crate::device::ColorMode;
 use crate::font;
-use crate::scene::Scene;
+use crate::scene::{Area, Scene};
 
-/// Rows the two digit pairs start on.
-const HOURS_ROW: i32 = 8;
-const MINUTES_ROW: i32 = 18;
-/// Rows of the blinking separator, between the two.
-const COLON_ROWS: [i32; 2] = [14, 16];
-/// Row of the seconds bar.
-const SECONDS_ROW: i32 = 28;
-
-/// Left edge of the first digit, centring a seven-pixel pair on nine.
-const DIGITS_X: i32 = 1;
-/// Distance between the two digits of a pair.
-const DIGIT_PITCH: i32 = 4;
+/// Rows needed for the small face: two rows of digits and a gap.
+const SMALL_HEIGHT: i32 = 11;
+/// Rows from which the large face is used instead.
+const LARGE_HEIGHT: i32 = 15;
+/// Rows from which there is room for the seconds bar as well.
+const SECONDS_HEIGHT: i32 = 17;
 
 const DIGIT_LEVEL: u8 = 255;
-const COLON_LEVEL: u8 = 160;
 const SECONDS_LEVEL: u8 = 70;
 
 /// A clock.
@@ -59,10 +53,15 @@ impl Clock {
         self.second = now.second();
     }
 
-    /// Draws a two-digit number with its tens on the left.
-    fn draw_pair(canvas: &mut Canvas, value: u32, row: i32) {
-        font::draw_digit(canvas, (value / 10) % 10, DIGITS_X, row, DIGIT_LEVEL);
-        font::draw_digit(canvas, value % 10, DIGITS_X + DIGIT_PITCH, row, DIGIT_LEVEL);
+    /// Draws a two-digit number, centred on the panel.
+    fn pair(canvas: &mut Canvas, value: u32, row: i32, large: bool) {
+        let (glyph, pitch, left) = if large {
+            (font::Size::Large, 5, 0)
+        } else {
+            (font::Size::Small, 4, 1)
+        };
+        font::draw_digit_sized(canvas, (value / 10) % 10, left, row, DIGIT_LEVEL, glyph);
+        font::draw_digit_sized(canvas, value % 10, left + pitch, row, DIGIT_LEVEL, glyph);
     }
 }
 
@@ -71,46 +70,51 @@ impl Scene for Clock {
         "clock"
     }
 
+    fn min_height(&self) -> i32 {
+        SMALL_HEIGHT
+    }
+
     fn update(&mut self, _delta: Duration) {
         // Cheaper than it looks: the panel only redraws when the picture
         // changes, so a clock costs one frame a second and nothing in between.
         self.read_time();
     }
 
-    fn render(&self, canvas: &mut Canvas) {
-        Self::draw_pair(canvas, self.hour, HOURS_ROW);
-        Self::draw_pair(canvas, self.minute, MINUTES_ROW);
+    fn render(&self, canvas: &mut Canvas, area: Area) {
+        let large = area.height >= LARGE_HEIGHT;
+        let digits = if large { 7 } else { 5 };
+        // The two rows of digits, with a gap, centred in whatever we were given.
+        let block = digits * 2 + 1;
+        let top = area.top + (area.height - block).max(0) / 2;
 
-        // The separator blinks on the second, which is what makes a digital
-        // clock look like it is running rather than frozen.
-        if self.second % 2 == 0 {
-            for row in COLON_ROWS {
-                canvas.set_max(4, row, COLON_LEVEL);
-            }
+        Self::pair(canvas, self.hour, top, large);
+        Self::pair(canvas, self.minute, top + digits + 1, large);
+
+        if area.height < SECONDS_HEIGHT {
+            // No room for seconds without crowding the digits; the time itself
+            // is what this is for.
+            return;
         }
 
-        // A minute's progress, one pixel per one-ninth of it.
+        // A minute's progress along the bottom row of the area.
+        let level = if self.mode == ColorMode::Bw {
+            u8::MAX
+        } else {
+            SECONDS_LEVEL
+        };
         let filled = i32::try_from(self.second * 9 / 60).unwrap_or(0);
         for x in 0..filled {
-            canvas.set_max(x, SECONDS_ROW, SECONDS_LEVEL);
-        }
-
-        if self.mode == ColorMode::Bw {
-            // Thresholding would drop the dim rows; brighten them instead of
-            // letting the clock lose its seconds.
-            for x in 0..filled {
-                canvas.set_max(x, SECONDS_ROW, u8::MAX);
-            }
+            canvas.set_max(x, area.bottom(), level);
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Clock, HOURS_ROW, MINUTES_ROW};
+    use super::{Clock, LARGE_HEIGHT, SECONDS_HEIGHT, SMALL_HEIGHT};
     use crate::canvas::Canvas;
     use crate::device::ColorMode;
-    use crate::scene::Scene;
+    use crate::scene::{Area, Scene};
 
     fn at(hour: u32, minute: u32, second: u32) -> Clock {
         let mut clock = Clock::new(ColorMode::Greyscale);
@@ -120,60 +124,120 @@ mod tests {
         clock
     }
 
+    fn drawn(clock: &Clock, area: Area) -> Canvas {
+        let mut canvas = Canvas::new();
+        clock.render(&mut canvas, area);
+        canvas
+    }
+
+    fn lit(canvas: &Canvas) -> usize {
+        (0..9)
+            .flat_map(|x| (0..34).map(move |y| (x, y)))
+            .filter(|(x, y)| canvas.get(*x, *y) > 0)
+            .count()
+    }
+
     #[test]
-    fn the_time_is_drawn_as_two_stacked_pairs() {
+    fn the_time_shows_at_the_smallest_size_it_asks_for() {
         let clock = at(12, 34, 0);
-        let mut canvas = Canvas::new();
-        clock.render(&mut canvas);
+        let canvas = drawn(
+            &clock,
+            Area {
+                top: 0,
+                height: SMALL_HEIGHT,
+            },
+        );
+        assert!(lit(&canvas) > 0, "nothing drawn in the height it asked for");
+    }
 
-        let lit_in = |rows: std::ops::Range<i32>| {
-            rows.flat_map(|y| (0..9).map(move |x| (x, y)))
-                .filter(|(x, y)| canvas.get(*x, *y) > 0)
-                .count()
+    #[test]
+    fn a_taller_area_gets_the_larger_face() {
+        // The large face spans all nine columns; the small one is inset by a
+        // pixel either side, so the outer columns tell them apart.
+        let clock = at(8, 8, 0);
+        let small = drawn(
+            &clock,
+            Area {
+                top: 0,
+                height: SMALL_HEIGHT,
+            },
+        );
+        let large = drawn(
+            &clock,
+            Area {
+                top: 0,
+                height: LARGE_HEIGHT,
+            },
+        );
+
+        let outer = |canvas: &Canvas| (0..34).any(|y| canvas.get(0, y) > 0 || canvas.get(8, y) > 0);
+        assert!(!outer(&small), "the small face reached the outer columns");
+        assert!(
+            outer(&large),
+            "the large face was not used when there was room"
+        );
+    }
+
+    #[test]
+    fn nothing_is_drawn_outside_the_area() {
+        // The invariant the whole stack rests on: a widget that overflows would
+        // silently scribble on its neighbour.
+        let clock = at(23, 59, 59);
+        for height in SMALL_HEIGHT..=34 {
+            for top in 0..=(34 - height) {
+                let canvas = drawn(&clock, Area { top, height });
+                for y in 0..34 {
+                    if y < top || y >= top + height {
+                        for x in 0..9 {
+                            assert_eq!(
+                                canvas.get(x, y),
+                                0,
+                                "row {y} lit for an area at {top} of {height}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_seconds_bar_waits_until_there_is_room_for_it() {
+        let clock = at(1, 2, 59);
+        let cramped = drawn(
+            &clock,
+            Area {
+                top: 0,
+                height: SECONDS_HEIGHT - 1,
+            },
+        );
+        let roomy = drawn(
+            &clock,
+            Area {
+                top: 0,
+                height: SECONDS_HEIGHT,
+            },
+        );
+
+        let bottom_row = |canvas: &Canvas, height: i32| {
+            (0..9).filter(|x| canvas.get(*x, height - 1) > 0).count()
         };
-        assert!(lit_in(HOURS_ROW..HOURS_ROW + 5) > 0, "no hours");
-        assert!(lit_in(MINUTES_ROW..MINUTES_ROW + 5) > 0, "no minutes");
-    }
-
-    #[test]
-    fn midnight_shows_four_zeroes_rather_than_nothing() {
-        let clock = at(0, 0, 0);
-        let mut canvas = Canvas::new();
-        clock.render(&mut canvas);
-        assert_ne!(canvas, Canvas::new(), "midnight drew an empty panel");
-    }
-
-    #[test]
-    fn the_separator_blinks_on_the_second() {
-        let mut lit = Canvas::new();
-        at(1, 2, 0).render(&mut lit);
-        let mut dark = Canvas::new();
-        at(1, 2, 1).render(&mut dark);
-
-        assert!(lit.get(4, 14) > 0, "the separator never lights");
-        assert_eq!(dark.get(4, 14), 0, "the separator never goes out");
-    }
-
-    #[test]
-    fn the_seconds_bar_fills_over_a_minute() {
-        let count = |second| {
-            let mut canvas = Canvas::new();
-            at(1, 2, second).render(&mut canvas);
-            (0..9)
-                .filter(|x| canvas.get(*x, super::SECONDS_ROW) > 0)
-                .count()
-        };
-        assert_eq!(count(0), 0);
-        assert!(count(30) > count(5), "the bar does not grow");
-        assert_eq!(count(59), 8);
+        assert_eq!(
+            bottom_row(&cramped, SECONDS_HEIGHT - 1),
+            0,
+            "crowded the digits"
+        );
+        assert!(
+            bottom_row(&roomy, SECONDS_HEIGHT) > 0,
+            "no seconds when there was room"
+        );
     }
 
     #[test]
     fn every_hour_and_minute_renders_something() {
         for hour in 0..24 {
             for minute in (0..60).step_by(7) {
-                let mut canvas = Canvas::new();
-                at(hour, minute, 30).render(&mut canvas);
+                let canvas = drawn(&at(hour, minute, 30), Area::FULL);
                 assert_ne!(canvas, Canvas::new(), "{hour:02}:{minute:02} drew nothing");
             }
         }

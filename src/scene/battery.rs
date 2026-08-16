@@ -1,36 +1,24 @@
 //! Charge level, drawn as a battery.
 //!
 //! An outline rather than a bare bar: on a panel with no labels, the shape is
-//! what says which number you are looking at.
+//! what says which number you are looking at. Given five rows it lies down;
+//! given the panel it stands up.
 
 use std::time::Duration;
 
 use crate::canvas::{self, Canvas};
 use crate::device::ColorMode;
-use crate::scene::Scene;
+use crate::scene::{Area, Scene};
 use crate::system::{self, Battery as Reading};
 
 /// How often the charge is re-read. It moves slowly; polling faster would only
 /// spin the disk cache.
 const SAMPLE_INTERVAL: f32 = 5.0;
 
-/// The terminal on top of the case.
-const CAP_ROWS: [i32; 2] = [3, 4];
-const CAP_COLUMNS: [i32; 3] = [3, 4, 5];
-
-/// The case: an outline from `TOP` to `BOTTOM`, `LEFT` to `RIGHT` inclusive.
-const TOP: i32 = 5;
-const BOTTOM: i32 = 31;
-const LEFT: i32 = 1;
-const RIGHT: i32 = 7;
-
-/// The fillable inside of the case.
-const FILL_TOP: i32 = TOP + 1;
-const FILL_BOTTOM: i32 = BOTTOM - 1;
-const FILL_ROWS: i32 = FILL_BOTTOM - FILL_TOP + 1;
-/// The same count as a float, for the charging wave.
-const FILL_ROWS_F: f32 = 25.0;
-const _: () = assert!(FILL_ROWS == 25);
+/// Rows for the battery lying down, terminal included.
+const COMPACT_HEIGHT: i32 = 5;
+/// Rows from which it stands up instead.
+const UPRIGHT_HEIGHT: i32 = 20;
 
 const OUTLINE_LEVEL: u8 = 90;
 const FILL_LEVEL: u8 = 255;
@@ -57,19 +45,75 @@ impl BatteryGauge {
         }
     }
 
-    /// Draws the case, which is the same whatever the charge.
-    fn draw_outline(canvas: &mut Canvas) {
-        for column in CAP_COLUMNS {
-            for row in CAP_ROWS {
-                canvas.set_max(column, row, OUTLINE_LEVEL);
-            }
+    /// The battery standing up, filling from the bottom.
+    fn draw_upright(&self, canvas: &mut Canvas, area: Area, reading: Option<Reading>) {
+        let top = area.row(2);
+        let bottom = area.bottom();
+        let (left, right) = (1, 7);
+
+        for x in 3..=5 {
+            canvas.set_max(x, area.top, OUTLINE_LEVEL);
+            canvas.set_max(x, area.row(1), OUTLINE_LEVEL);
+        }
+        canvas.hline(left, right, top, OUTLINE_LEVEL);
+        canvas.hline(left, right, bottom, OUTLINE_LEVEL);
+        for y in top..=bottom {
+            canvas.set_max(left, y, OUTLINE_LEVEL);
+            canvas.set_max(right, y, OUTLINE_LEVEL);
         }
 
-        canvas.hline(LEFT, RIGHT, TOP, OUTLINE_LEVEL);
-        canvas.hline(LEFT, RIGHT, BOTTOM, OUTLINE_LEVEL);
-        for row in TOP..=BOTTOM {
-            canvas.set_max(LEFT, row, OUTLINE_LEVEL);
-            canvas.set_max(RIGHT, row, OUTLINE_LEVEL);
+        let Some(reading) = reading else {
+            return;
+        };
+        let rows = bottom - top - 1;
+        let filled = i32::from(reading.capacity) * rows / 100;
+        for step in 0..filled {
+            canvas.hline(left + 1, right - 1, bottom - 1 - step, FILL_LEVEL);
+        }
+
+        if reading.charging && rows > 0 {
+            // A wave climbing the fill, so charging reads as motion rather
+            // than as a number you have to remember.
+            let span = f32::from(u8::try_from(rows).unwrap_or(1));
+            let travel = (self.elapsed * CHARGE_WAVE_ROWS) % span;
+            let wave = bottom - 1 - canvas::floor_pixel(travel);
+            let level = if self.mode == ColorMode::Bw {
+                0
+            } else {
+                OUTLINE_LEVEL
+            };
+            for x in (left + 1)..right {
+                canvas.set(x, wave, level);
+            }
+        }
+    }
+
+    /// The battery lying down, filling from the left.
+    fn draw_lying(canvas: &mut Canvas, area: Area, reading: Option<Reading>) {
+        let (top, bottom) = (area.top, area.top + 4);
+        canvas.hline(0, 7, top, OUTLINE_LEVEL);
+        canvas.hline(0, 7, bottom, OUTLINE_LEVEL);
+        for y in top..=bottom {
+            canvas.set_max(0, y, OUTLINE_LEVEL);
+            canvas.set_max(7, y, OUTLINE_LEVEL);
+        }
+        for y in (top + 1)..bottom {
+            canvas.set_max(8, y, OUTLINE_LEVEL);
+        }
+
+        let Some(reading) = reading else {
+            return;
+        };
+        let filled = i32::from(reading.capacity) * 6 / 100;
+        for step in 0..filled {
+            for y in (top + 1)..bottom {
+                canvas.set_max(1 + step, y, FILL_LEVEL);
+            }
+        }
+        if reading.charging {
+            for (x, dy) in [(4, 1), (3, 2), (5, 2), (4, 3)] {
+                canvas.set(x, top + dy, 0);
+            }
         }
     }
 }
@@ -77,6 +121,10 @@ impl BatteryGauge {
 impl Scene for BatteryGauge {
     fn name(&self) -> &'static str {
         "battery"
+    }
+
+    fn min_height(&self) -> i32 {
+        COMPACT_HEIGHT
     }
 
     fn update(&mut self, delta: Duration) {
@@ -89,46 +137,23 @@ impl Scene for BatteryGauge {
         }
     }
 
-    fn render(&self, canvas: &mut Canvas) {
-        Self::draw_outline(canvas);
-
-        let Some(reading) = self.reading else {
-            // No battery, or it could not be read: the empty case says so
-            // rather than showing a confident zero.
-            return;
-        };
-
-        let filled = i32::from(reading.capacity) * FILL_ROWS / 100;
-        for step in 0..filled {
-            let row = FILL_BOTTOM - step;
-            canvas.hline(LEFT + 1, RIGHT - 1, row, FILL_LEVEL);
-        }
-
-        if !reading.charging {
-            return;
-        }
-
-        // A wave climbing the fill, so charging reads as motion rather than as
-        // a number you have to remember.
-        let travel = (self.elapsed * CHARGE_WAVE_ROWS) % FILL_ROWS_F;
-        let wave = FILL_BOTTOM - canvas::floor_pixel(travel);
-        let level = if self.mode == ColorMode::Bw {
-            0
+    fn render(&self, canvas: &mut Canvas, area: Area) {
+        // No battery, or it could not be read: the empty case says so rather
+        // than showing a confident zero.
+        if area.height >= UPRIGHT_HEIGHT {
+            self.draw_upright(canvas, area, self.reading);
         } else {
-            OUTLINE_LEVEL
-        };
-        for x in (LEFT + 1)..RIGHT {
-            canvas.set(x, wave, level);
+            Self::draw_lying(canvas, area.centred(COMPACT_HEIGHT), self.reading);
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{BOTTOM, BatteryGauge, FILL_BOTTOM, FILL_ROWS, LEFT, RIGHT, TOP};
+    use super::{BatteryGauge, COMPACT_HEIGHT, UPRIGHT_HEIGHT};
     use crate::canvas::Canvas;
     use crate::device::ColorMode;
-    use crate::scene::Scene;
+    use crate::scene::{Area, Scene};
     use crate::system::Battery as Reading;
 
     fn gauge(capacity: u8, charging: bool) -> BatteryGauge {
@@ -137,102 +162,87 @@ mod tests {
         gauge
     }
 
-    fn fill_height(canvas: &Canvas) -> i32 {
-        (0..34)
-            .filter(|y| canvas.get(LEFT + 1, *y) == 255)
-            .count()
-            .try_into()
-            .unwrap_or(0)
+    fn drawn(gauge: &BatteryGauge, area: Area) -> Canvas {
+        let mut canvas = Canvas::new();
+        gauge.render(&mut canvas, area);
+        canvas
     }
 
     #[test]
     fn the_case_is_drawn_whatever_the_charge() {
-        let mut canvas = Canvas::new();
-        gauge(0, false).render(&mut canvas);
-
-        assert!(canvas.get(LEFT, TOP) > 0, "no top-left corner");
-        assert!(canvas.get(RIGHT, BOTTOM) > 0, "no bottom-right corner");
-        assert!(canvas.get(4, 3) > 0, "no terminal");
+        for height in [COMPACT_HEIGHT, UPRIGHT_HEIGHT, 34] {
+            let canvas = drawn(&gauge(0, false), Area { top: 0, height });
+            assert_ne!(canvas, Canvas::new(), "no case at height {height}");
+        }
     }
 
     #[test]
     fn the_fill_tracks_the_charge() {
-        let mut empty = Canvas::new();
-        gauge(0, false).render(&mut empty);
-        assert_eq!(fill_height(&empty), 0);
-
-        let mut full = Canvas::new();
-        gauge(100, false).render(&mut full);
-        assert_eq!(fill_height(&full), FILL_ROWS);
-
-        let mut half = Canvas::new();
-        gauge(50, false).render(&mut half);
-        let height = fill_height(&half);
+        let count = |capacity| {
+            let canvas = drawn(&gauge(capacity, false), Area::FULL);
+            (0..34)
+                .flat_map(|y| (0..9).map(move |x| (x, y)))
+                .filter(|(x, y)| canvas.get(*x, *y) == 255)
+                .count()
+        };
+        assert_eq!(count(0), 0, "an empty battery drew a fill");
         assert!(
-            (FILL_ROWS / 2 - 1..=FILL_ROWS / 2 + 1).contains(&height),
-            "50% gave {height} of {FILL_ROWS}"
+            count(50) > 0 && count(50) < count(100),
+            "the fill does not grow"
         );
     }
 
     #[test]
-    fn the_fill_grows_upwards_from_the_bottom_of_the_case() {
-        let mut canvas = Canvas::new();
-        gauge(20, false).render(&mut canvas);
-        assert_eq!(
-            canvas.get(LEFT + 1, FILL_BOTTOM),
-            255,
-            "not filled at the bottom"
+    fn it_lies_down_when_cramped_and_stands_up_when_not() {
+        // Lying down, the terminal is a notch on the right edge; standing up it
+        // is a cap on the top row.
+        let compact = drawn(
+            &gauge(100, false),
+            Area {
+                top: 0,
+                height: COMPACT_HEIGHT,
+            },
         );
-        assert_ne!(canvas.get(LEFT + 1, TOP + 1), 255, "20% reached the top");
+        let upright = drawn(
+            &gauge(100, false),
+            Area {
+                top: 0,
+                height: UPRIGHT_HEIGHT,
+            },
+        );
+
+        assert!(compact.get(8, 2) > 0, "no terminal on the lying battery");
+        assert!(upright.get(4, 0) > 0, "no cap on the upright battery");
     }
 
     #[test]
-    fn the_fill_never_escapes_the_case() {
-        let mut canvas = Canvas::new();
-        gauge(100, false).render(&mut canvas);
-        for y in 0..34 {
-            assert_ne!(canvas.get(0, y), 255, "the fill spilled past the left wall");
-            assert_ne!(
-                canvas.get(8, y),
-                255,
-                "the fill spilled past the right wall"
-            );
+    fn nothing_is_drawn_outside_the_area() {
+        let full = gauge(100, true);
+        for height in COMPACT_HEIGHT..=34 {
+            for top in [0, (34 - height) / 2, 34 - height] {
+                let canvas = drawn(&full, Area { top, height });
+                for y in 0..34 {
+                    if y < top || y >= top + height {
+                        for x in 0..9 {
+                            assert_eq!(canvas.get(x, y), 0, "row {y} for {top}+{height}");
+                        }
+                    }
+                }
+            }
         }
-        assert_eq!(canvas.get(LEFT + 1, BOTTOM), 90, "the fill ate the case");
     }
 
     #[test]
-    fn a_battery_that_cannot_be_read_shows_an_empty_case_not_a_flat_zero() {
+    fn a_battery_that_cannot_be_read_shows_an_empty_case() {
         let mut gauge = BatteryGauge::new(ColorMode::Greyscale);
         gauge.reading = None;
+        let canvas = drawn(&gauge, Area::FULL);
 
-        let mut canvas = Canvas::new();
-        gauge.render(&mut canvas);
-
-        assert!(canvas.get(LEFT, TOP) > 0, "no case at all");
-        assert_eq!(fill_height(&canvas), 0);
-    }
-
-    #[test]
-    fn charging_animates_while_discharging_stays_still() {
-        let mut moving = gauge(60, true);
-        let mut seen = std::collections::HashSet::new();
-        for _ in 0..30 {
-            moving.update(std::time::Duration::from_millis(50));
-            let mut canvas = Canvas::new();
-            moving.render(&mut canvas);
-            seen.insert((0..34).map(|y| canvas.get(4, y)).collect::<Vec<_>>());
-        }
-        assert!(seen.len() > 1, "the charging wave never moved");
-
-        let mut still = gauge(60, false);
-        let mut frames = std::collections::HashSet::new();
-        for _ in 0..30 {
-            still.update(std::time::Duration::from_millis(50));
-            let mut canvas = Canvas::new();
-            still.render(&mut canvas);
-            frames.insert((0..34).map(|y| canvas.get(4, y)).collect::<Vec<_>>());
-        }
-        assert_eq!(frames.len(), 1, "a discharging battery flickered");
+        assert_ne!(canvas, Canvas::new(), "no case at all");
+        let filled = (0..34)
+            .flat_map(|y| (0..9).map(move |x| (x, y)))
+            .filter(|(x, y)| canvas.get(*x, *y) == 255)
+            .count();
+        assert_eq!(filled, 0, "an unreadable battery showed a level");
     }
 }

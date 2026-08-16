@@ -15,7 +15,7 @@ use rand::rngs::StdRng;
 
 use crate::canvas::{self, Canvas, PIXELS};
 use crate::device::ColorMode;
-use crate::scene::{Scene, rng_from};
+use crate::scene::{Area, Scene, rng_from};
 
 /// Time between two moves.
 ///
@@ -432,6 +432,12 @@ impl Scene for Snake {
         "snake"
     }
 
+    /// The whole panel. A game played on a strip is not the same game, so this
+    /// asks for everything rather than degrading.
+    fn min_height(&self) -> i32 {
+        canvas::HEIGHT
+    }
+
     fn update(&mut self, delta: Duration) {
         let dt = delta.as_secs_f32().min(MAX_STEP);
         self.elapsed += dt;
@@ -463,7 +469,7 @@ impl Scene for Snake {
         }
     }
 
-    fn render(&self, canvas: &mut Canvas) {
+    fn render(&self, canvas: &mut Canvas, _area: Area) {
         let ending = match self.phase {
             Phase::Dying(remaining) => Some((remaining, DEATH_FLASH_HZ)),
             Phase::Won(remaining) => Some((remaining, WIN_FLASH_HZ)),
@@ -598,7 +604,7 @@ mod tests {
     use super::{Cell, Direction, PIXELS, Phase, Snake, body_level, search, slot};
     use crate::canvas::{self, Canvas};
     use crate::device::{BW_THRESHOLD, ColorMode};
-    use crate::scene::Scene;
+    use crate::scene::{Area, Scene};
     use std::time::Duration;
 
     fn empty_grid() -> [bool; PIXELS] {
@@ -843,7 +849,7 @@ mod tests {
         }
 
         let mut canvas = Canvas::new();
-        snake.render(&mut canvas);
+        snake.render(&mut canvas, Area::FULL);
 
         let head = snake.body.front().copied().unwrap();
         assert_eq!(canvas.get(head.x, head.y), 255);
@@ -873,7 +879,7 @@ mod tests {
                 }
 
                 let mut canvas = Canvas::new();
-                snake.render(&mut canvas);
+                snake.render(&mut canvas, Area::FULL);
                 for (index, cell) in snake.body.iter().enumerate() {
                     assert!(
                         canvas.get(cell.x, cell.y) >= BW_THRESHOLD,
@@ -895,7 +901,7 @@ mod tests {
         for _ in 0..300 {
             snake.elapsed += 0.01;
             let mut canvas = Canvas::new();
-            snake.render(&mut canvas);
+            snake.render(&mut canvas, Area::FULL);
             if canvas.get(food.x, food.y) >= BW_THRESHOLD {
                 lit += 1;
             }

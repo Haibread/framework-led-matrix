@@ -11,7 +11,7 @@ use tracing::{debug, info, warn};
 
 use crate::canvas::Canvas;
 use crate::device::{ColorMode, Matrix};
-use crate::scene::Scene;
+use crate::scene::{Area, Scene};
 
 /// Something the control socket asks of a running panel.
 pub enum Command<S> {
@@ -164,7 +164,7 @@ pub fn run_panel<M: Matrix, S: Scene>(
 
         scene.update(delta);
         canvas.clear();
-        scene.render(&mut canvas);
+        scene.render(&mut canvas, Area::FULL);
 
         // The borrow has to end before the handle can be dropped below.
         let drawn = matrix.draw(&canvas);
@@ -312,8 +312,9 @@ mod tests {
     fn scene_stopping_after_a_frame(stop: Arc<AtomicBool>) -> MockScene {
         let mut scene = MockScene::new();
         scene.expect_name().returning(|| "test");
+        scene.expect_min_height().returning(|| 1);
         scene.expect_update().returning(|_| ());
-        scene.expect_render().returning(move |_| {
+        scene.expect_render().returning(move |_, _| {
             stop.store(true, Ordering::Relaxed);
         });
         scene
@@ -323,8 +324,9 @@ mod tests {
     fn idle_scene() -> MockScene {
         let mut scene = MockScene::new();
         scene.expect_name().returning(|| "test");
+        scene.expect_min_height().returning(|| 1);
         scene.expect_update().returning(|_| ());
-        scene.expect_render().returning(|_| ());
+        scene.expect_render().returning(|_, _| ());
         scene
     }
 

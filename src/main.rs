@@ -31,12 +31,13 @@ use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use cli::Cli;
+use control::SceneSpec;
 use control::{PanelName, Request, Response};
 use device::serial::SerialMatrix;
 use device::terminal::TerminalMatrix;
 use device::{ColorMode, Panel};
 use runner::PanelSettings;
-use scene::{AnyScene, SceneKind};
+use scene::AnyScene;
 
 /// Terminal columns the preview panels are drawn at.
 const LEFT_PREVIEW_COLUMN: usize = 3;
@@ -46,7 +47,7 @@ const RIGHT_PREVIEW_COLUMN: usize = 27;
 struct PanelSpec {
     name: PanelName,
     device: String,
-    scene: SceneKind,
+    scene: SceneSpec,
     preview_column: usize,
 }
 
@@ -55,7 +56,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     if let Some(command) = &cli.command {
-        return send(&cli.socket_path(), request_for(command));
+        return send(&cli.socket_path(), &request_for(command));
     }
 
     tracing_subscriber::fmt()
@@ -66,19 +67,19 @@ async fn main() -> Result<()> {
     // What was asked for wins, then what was saved, then the defaults.
     let state_path = cli.state_path();
     let saved = state::load(&state_path);
-    let brightness = cli.brightness_for(saved);
+    let brightness = cli.brightness_for(&saved);
 
     let specs = [
         PanelSpec {
             name: PanelName::Left,
             device: cli.left_device.clone(),
-            scene: cli.scene_for(PanelName::Left, saved),
+            scene: cli.scene_for(PanelName::Left, &saved),
             preview_column: LEFT_PREVIEW_COLUMN,
         },
         PanelSpec {
             name: PanelName::Right,
             device: cli.right_device.clone(),
-            scene: cli.scene_for(PanelName::Right, saved),
+            scene: cli.scene_for(PanelName::Right, &saved),
             preview_column: RIGHT_PREVIEW_COLUMN,
         },
     ];
@@ -91,12 +92,17 @@ async fn main() -> Result<()> {
     for (index, spec) in specs.into_iter().enumerate() {
         // Offset the seed per panel, or both games play out identically.
         let seed = cli.seed.map(|seed| seed.wrapping_add(index as u64));
-        let mode = cli.color_mode.resolve(spec.scene.preferred_color_mode());
         let label = spec.name.label();
-        let Some(scene) = AnyScene::new(spec.scene, seed, mode) else {
+        // A stack takes the colour mode of the scene at its head.
+        let head = spec.scene.scenes().first().copied();
+        let Some(head) = head else { continue };
+        if head == scene::SceneKind::Off && spec.scene.scenes().len() == 1 {
             info!(panel = label, "panel disabled");
             continue;
-        };
+        }
+        let mode = cli.color_mode.resolve(head.preferred_color_mode());
+        let scene = AnyScene::stack(&spec.scene, seed, mode)
+            .with_context(|| format!("building the {label} panel"))?;
 
         let stop = Arc::clone(&shutdown);
         let settings = PanelSettings {
@@ -114,7 +120,7 @@ async fn main() -> Result<()> {
 
         let (sender, commands) = channel();
         channels.insert(spec.name, sender);
-        showing.insert(spec.name, spec.scene);
+        showing.insert(spec.name, spec.scene.clone());
 
         // The serial writes are blocking, so each panel owns a blocking thread
         // rather than pretending to be async.
@@ -185,15 +191,18 @@ fn open_panel(
 
 /// Turns a subcommand into the request that goes over the socket.
 fn request_for(command: &cli::Command) -> Request {
-    match *command {
-        cli::Command::Set { panel, scene } => Request::Set { panel, scene },
-        cli::Command::Brightness { level } => Request::Brightness(level),
+    match command {
+        cli::Command::Set { panel, scene } => Request::Set {
+            panel: *panel,
+            scene: scene.clone(),
+        },
+        cli::Command::Brightness { level } => Request::Brightness(*level),
         cli::Command::Status => Request::Status,
     }
 }
 
 /// Sends one request to a running daemon and prints its answer.
-fn send(socket: &Path, request: Request) -> Result<()> {
+fn send(socket: &Path, request: &Request) -> Result<()> {
     let stream = UnixStream::connect(socket).with_context(|| {
         format!(
             "no daemon listening on {} — is ledmat running?",

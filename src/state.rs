@@ -12,16 +12,15 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use tracing::{debug, warn};
 
-use crate::control::PanelName;
-use crate::scene::SceneKind;
+use crate::control::{PanelName, SceneSpec};
 
 /// What survives a restart.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct State {
-    /// Scene on the left module, if one was ever set.
-    pub left: Option<SceneKind>,
-    /// Scene on the right module, if one was ever set.
-    pub right: Option<SceneKind>,
+    /// Scenes on the left module, if any were ever set.
+    pub left: Option<SceneSpec>,
+    /// Scenes on the right module, if any were ever set.
+    pub right: Option<SceneSpec>,
     /// Panel brightness, if it was ever set.
     pub brightness: Option<u8>,
 }
@@ -29,15 +28,15 @@ pub struct State {
 impl State {
     /// The scene remembered for `panel`.
     #[must_use]
-    pub fn scene(self, panel: PanelName) -> Option<SceneKind> {
+    pub fn scene(&self, panel: PanelName) -> Option<SceneSpec> {
         match panel {
-            PanelName::Left => self.left,
-            PanelName::Right => self.right,
+            PanelName::Left => self.left.clone(),
+            PanelName::Right => self.right.clone(),
         }
     }
 
-    /// Remembers a scene for `panel`.
-    pub fn set_scene(&mut self, panel: PanelName, scene: SceneKind) {
+    /// Remembers what `panel` shows.
+    pub fn set_scene(&mut self, panel: PanelName, scene: SceneSpec) {
         match panel {
             PanelName::Left => self.left = Some(scene),
             PanelName::Right => self.right = Some(scene),
@@ -47,12 +46,12 @@ impl State {
 
 /// Renders the state as the file's contents.
 #[must_use]
-pub fn format(state: State) -> String {
+pub fn format(state: &State) -> String {
     let mut out = String::from("# Written by ledmat; edit freely, it is read back as is.\n");
-    if let Some(scene) = state.left {
+    if let Some(scene) = &state.left {
         let _ = writeln!(out, "left={scene}");
     }
-    if let Some(scene) = state.right {
+    if let Some(scene) = &state.right {
         let _ = writeln!(out, "right={scene}");
     }
     if let Some(brightness) = state.brightness {
@@ -78,9 +77,9 @@ pub fn parse(text: &str) -> State {
         }
     }
 
-    let scene = |key: &str| -> Option<SceneKind> {
+    let scene = |key: &str| -> Option<SceneSpec> {
         let raw = pairs.get(key)?;
-        let Ok(kind) = crate::control::scene_from_str(raw) else {
+        let Ok(kind) = raw.parse::<SceneSpec>() else {
             warn!(
                 key,
                 value = raw,
@@ -134,7 +133,7 @@ pub fn load(path: &Path) -> State {
 /// # Errors
 ///
 /// Fails if the directory cannot be created or the file cannot be written.
-pub fn save(path: &Path, state: State) -> Result<()> {
+pub fn save(path: &Path, state: &State) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     }
@@ -152,25 +151,25 @@ pub fn save(path: &Path, state: State) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{State, format, load, parse, save};
-    use crate::control::PanelName;
+    use crate::control::{PanelName, SceneSpec};
     use crate::scene::SceneKind;
 
     fn full() -> State {
         State {
-            left: Some(SceneKind::Clock),
-            right: Some(SceneKind::Snake),
+            left: Some(SceneSpec::single(SceneKind::Clock)),
+            right: Some(SceneSpec::single(SceneKind::Snake)),
             brightness: Some(42),
         }
     }
 
     #[test]
     fn a_state_survives_a_round_trip() {
-        assert_eq!(parse(&format(full())), full());
+        assert_eq!(parse(&format(&full())), full());
     }
 
     #[test]
     fn an_empty_state_writes_only_a_comment_and_reads_back_empty() {
-        let text = format(State::default());
+        let text = format(&State::default());
         assert!(text.starts_with('#'));
         assert_eq!(parse(&text), State::default());
     }
@@ -181,29 +180,32 @@ mod tests {
         // take the rest of the settings down with it.
         let state = parse("left=tetris\nright=snake\nbrightness=30\n");
         assert_eq!(state.left, None);
-        assert_eq!(state.right, Some(SceneKind::Snake));
+        assert_eq!(state.right, Some(SceneSpec::single(SceneKind::Snake)));
         assert_eq!(state.brightness, Some(30));
     }
 
     #[test]
     fn junk_is_ignored_rather_than_fatal() {
         let state = parse("\n\n# a comment\nnonsense\nbrightness=oops\nleft=pong\n");
-        assert_eq!(state.left, Some(SceneKind::Pong));
+        assert_eq!(state.left, Some(SceneSpec::single(SceneKind::Pong)));
         assert_eq!(state.brightness, None);
     }
 
     #[test]
     fn whitespace_around_keys_and_values_is_tolerated() {
         let state = parse("  left =  gauges  \n\tbrightness\t=\t7\n");
-        assert_eq!(state.left, Some(SceneKind::Gauges));
+        assert_eq!(state.left, Some(SceneSpec::single(SceneKind::Gauges)));
         assert_eq!(state.brightness, Some(7));
     }
 
     #[test]
     fn scenes_are_remembered_per_panel() {
         let mut state = State::default();
-        state.set_scene(PanelName::Left, SceneKind::Battery);
-        assert_eq!(state.scene(PanelName::Left), Some(SceneKind::Battery));
+        state.set_scene(PanelName::Left, SceneSpec::single(SceneKind::Battery));
+        assert_eq!(
+            state.scene(PanelName::Left),
+            Some(SceneSpec::single(SceneKind::Battery))
+        );
         assert_eq!(state.scene(PanelName::Right), None);
     }
 
@@ -212,7 +214,7 @@ mod tests {
         let directory = std::env::temp_dir().join(format!("ledmat-state-{}", std::process::id()));
         let path = directory.join("nested/state");
 
-        save(&path, full()).expect("save");
+        save(&path, &full()).expect("save");
         assert_eq!(load(&path), full(), "the file did not come back");
 
         let _ = std::fs::remove_dir_all(&directory);

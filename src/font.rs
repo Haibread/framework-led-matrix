@@ -2,10 +2,38 @@
 
 use crate::canvas::Canvas;
 
-/// Width of one glyph, in pixels.
+/// Width of one small glyph, in pixels.
 pub const GLYPH_WIDTH: i32 = 3;
-/// Height of one glyph, in pixels.
+/// Height of one small glyph, in pixels.
+#[cfg(test)]
 pub const GLYPH_HEIGHT: i32 = 5;
+
+/// Which face to draw with.
+///
+/// Two digits of the large face come to exactly nine pixels with their gap,
+/// which is the whole panel — it is the biggest legible size this display can
+/// hold, and worth having whenever there are rows to spare.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Size {
+    /// 3x5, the one that fits anywhere.
+    Small,
+    /// 4x7, for when there is room.
+    Large,
+}
+
+/// Row bitmaps for the digits `0` to `9` in the large face.
+const DIGITS_LARGE: [[u8; 7]; 10] = [
+    [0b1111, 0b1001, 0b1001, 0b1001, 0b1001, 0b1001, 0b1111],
+    [0b0010, 0b0110, 0b0010, 0b0010, 0b0010, 0b0010, 0b0111],
+    [0b1111, 0b0001, 0b0001, 0b1111, 0b1000, 0b1000, 0b1111],
+    [0b1111, 0b0001, 0b0001, 0b0111, 0b0001, 0b0001, 0b1111],
+    [0b1001, 0b1001, 0b1001, 0b1111, 0b0001, 0b0001, 0b0001],
+    [0b1111, 0b1000, 0b1000, 0b1111, 0b0001, 0b0001, 0b1111],
+    [0b1111, 0b1000, 0b1000, 0b1111, 0b1001, 0b1001, 0b1111],
+    [0b1111, 0b0001, 0b0001, 0b0010, 0b0010, 0b0100, 0b0100],
+    [0b1111, 0b1001, 0b1001, 0b1111, 0b1001, 0b1001, 0b1111],
+    [0b1111, 0b1001, 0b1001, 0b1111, 0b0001, 0b0001, 0b1111],
+];
 
 /// Row bitmaps for the digits `0` to `9`, most significant bit leftmost.
 const DIGITS: [[u8; 5]; 10] = [
@@ -25,13 +53,31 @@ const DIGITS: [[u8; 5]; 10] = [
 ///
 /// Values above `9` draw nothing, which keeps callers free of range checks.
 pub fn draw_digit(canvas: &mut Canvas, digit: u32, x: i32, y: i32, value: u8) {
-    let Some(glyph) = usize::try_from(digit).ok().and_then(|d| DIGITS.get(d)) else {
+    draw_digit_sized(canvas, digit, x, y, value, Size::Small);
+}
+
+/// Draws `digit` in the chosen face, top-left corner at `(x, y)`.
+///
+/// Values above `9` draw nothing, which keeps callers free of range checks.
+pub fn draw_digit_sized(canvas: &mut Canvas, digit: u32, x: i32, y: i32, value: u8, size: Size) {
+    let Some(index) = usize::try_from(digit).ok() else {
         return;
     };
 
-    for (bits, row) in glyph.iter().zip(0..GLYPH_HEIGHT) {
-        for column in 0..GLYPH_WIDTH {
-            if bits & (1u8 << (GLYPH_WIDTH - 1 - column)) != 0 {
+    let (rows, width): (&[u8], i32) = match size {
+        Size::Small => match DIGITS.get(index) {
+            Some(glyph) => (glyph, GLYPH_WIDTH),
+            None => return,
+        },
+        Size::Large => match DIGITS_LARGE.get(index) {
+            Some(glyph) => (glyph, 4),
+            None => return,
+        },
+    };
+
+    for (bits, row) in rows.iter().zip(0..) {
+        for column in 0..width {
+            if bits & (1u8 << (width - 1 - column)) != 0 {
                 canvas.set_max(x + column, y + row, value);
             }
         }

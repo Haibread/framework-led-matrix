@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
-use crate::control::PanelName;
+use crate::control::{PanelName, SceneSpec};
 use crate::device::ColorMode;
 use crate::scene::SceneKind;
 
@@ -57,8 +57,8 @@ pub enum Command {
     Set {
         /// Which module
         panel: PanelName,
-        /// What it should show
-        scene: SceneKind,
+        /// What it should show; several separated by commas stack top to bottom
+        scene: SceneSpec,
     },
     /// Set the brightness of every panel
     Brightness {
@@ -97,14 +97,14 @@ pub struct Cli {
     /// Unset, the last scene set through the socket is restored; failing that,
     /// pong.
     #[arg(long, env = "LEFT_SCENE")]
-    pub left_scene: Option<SceneKind>,
+    pub left_scene: Option<SceneSpec>,
 
     /// What to show on the right module
     ///
     /// Unset, the last scene set through the socket is restored; failing that,
     /// snake.
     #[arg(long, env = "RIGHT_SCENE")]
-    pub right_scene: Option<SceneKind>,
+    pub right_scene: Option<SceneSpec>,
 
     /// Panel brightness, 0 to 255
     ///
@@ -150,6 +150,7 @@ pub struct Cli {
 /// Scenes used when nothing has been chosen and nothing was saved.
 const DEFAULT_LEFT_SCENE: SceneKind = SceneKind::Pong;
 const DEFAULT_RIGHT_SCENE: SceneKind = SceneKind::Snake;
+
 /// Brightness used in the same case.
 const DEFAULT_BRIGHTNESS: u8 = 30;
 
@@ -167,17 +168,20 @@ impl Cli {
     /// What was asked for on the command line wins, then what was last set
     /// through the socket, then the default.
     #[must_use]
-    pub fn scene_for(&self, panel: PanelName, saved: crate::state::State) -> SceneKind {
+    pub fn scene_for(&self, panel: PanelName, saved: &crate::state::State) -> SceneSpec {
         let (asked, fallback) = match panel {
-            PanelName::Left => (self.left_scene, DEFAULT_LEFT_SCENE),
-            PanelName::Right => (self.right_scene, DEFAULT_RIGHT_SCENE),
+            PanelName::Left => (self.left_scene.as_ref(), DEFAULT_LEFT_SCENE),
+            PanelName::Right => (self.right_scene.as_ref(), DEFAULT_RIGHT_SCENE),
         };
-        asked.or_else(|| saved.scene(panel)).unwrap_or(fallback)
+        asked
+            .cloned()
+            .or_else(|| saved.scene(panel))
+            .unwrap_or_else(|| SceneSpec::single(fallback))
     }
 
     /// The brightness to start with, by the same rule.
     #[must_use]
-    pub fn brightness_for(&self, saved: crate::state::State) -> u8 {
+    pub fn brightness_for(&self, saved: &crate::state::State) -> u8 {
         self.brightness
             .or(saved.brightness)
             .unwrap_or(DEFAULT_BRIGHTNESS)
@@ -197,7 +201,7 @@ impl Cli {
 #[cfg(test)]
 mod tests {
     use super::{Cli, ColorModeChoice};
-    use crate::control::PanelName;
+    use crate::control::{PanelName, SceneSpec};
     use crate::device::ColorMode;
     use crate::scene::SceneKind;
     use clap::{CommandFactory, Parser};
@@ -224,46 +228,64 @@ mod tests {
     fn the_command_line_wins_over_the_saved_setup() {
         let cli = Cli::parse_from(["ledmat", "--left-scene", "clock", "--brightness", "12"]);
         let saved = crate::state::State {
-            left: Some(SceneKind::Snake),
-            right: Some(SceneKind::Battery),
+            left: Some(SceneSpec::single(SceneKind::Snake)),
+            right: Some(SceneSpec::single(SceneKind::Battery)),
             brightness: Some(99),
         };
 
-        assert_eq!(cli.scene_for(PanelName::Left, saved), SceneKind::Clock);
-        assert_eq!(cli.brightness_for(saved), 12);
+        assert_eq!(
+            cli.scene_for(PanelName::Left, &saved),
+            SceneSpec::single(SceneKind::Clock)
+        );
+        assert_eq!(cli.brightness_for(&saved), 12);
         // Nothing was asked for the right panel, so the saved scene stands.
-        assert_eq!(cli.scene_for(PanelName::Right, saved), SceneKind::Battery);
+        assert_eq!(
+            cli.scene_for(PanelName::Right, &saved),
+            SceneSpec::single(SceneKind::Battery)
+        );
     }
 
     #[test]
     fn the_saved_setup_wins_over_the_defaults() {
         let cli = Cli::parse_from(["ledmat"]);
         let saved = crate::state::State {
-            left: Some(SceneKind::Gauges),
+            left: Some(SceneSpec::single(SceneKind::Gauges)),
             right: None,
             brightness: Some(7),
         };
 
-        assert_eq!(cli.scene_for(PanelName::Left, saved), SceneKind::Gauges);
-        assert_eq!(cli.brightness_for(saved), 7);
+        assert_eq!(
+            cli.scene_for(PanelName::Left, &saved),
+            SceneSpec::single(SceneKind::Gauges)
+        );
+        assert_eq!(cli.brightness_for(&saved), 7);
         // Nothing asked and nothing saved: the default.
-        assert_eq!(cli.scene_for(PanelName::Right, saved), SceneKind::Snake);
+        assert_eq!(
+            cli.scene_for(PanelName::Right, &saved),
+            SceneSpec::single(SceneKind::Snake)
+        );
     }
 
     #[test]
     fn a_first_run_falls_back_to_the_defaults() {
         let cli = Cli::parse_from(["ledmat"]);
         let empty = crate::state::State::default();
-        assert_eq!(cli.scene_for(PanelName::Left, empty), SceneKind::Pong);
-        assert_eq!(cli.scene_for(PanelName::Right, empty), SceneKind::Snake);
-        assert_eq!(cli.brightness_for(empty), 30);
+        assert_eq!(
+            cli.scene_for(PanelName::Left, &empty),
+            SceneSpec::single(SceneKind::Pong)
+        );
+        assert_eq!(
+            cli.scene_for(PanelName::Right, &empty),
+            SceneSpec::single(SceneKind::Snake)
+        );
+        assert_eq!(cli.brightness_for(&empty), 30);
     }
 
     #[test]
     fn scenes_are_selected_by_name() {
         let cli = Cli::parse_from(["ledmat", "--left-scene", "off", "--right-scene", "pong"]);
-        assert_eq!(cli.left_scene, Some(SceneKind::Off));
-        assert_eq!(cli.right_scene, Some(SceneKind::Pong));
+        assert_eq!(cli.left_scene, Some(SceneSpec::single(SceneKind::Off)));
+        assert_eq!(cli.right_scene, Some(SceneSpec::single(SceneKind::Pong)));
     }
 
     #[test]

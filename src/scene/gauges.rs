@@ -1,10 +1,11 @@
-//! Processor and memory load, as two columns filling from the bottom.
+//! Processor and memory load: two bars when cramped, two histories when not.
 
+use std::collections::VecDeque;
 use std::time::Duration;
 
 use crate::canvas::{self, Canvas};
 use crate::device::ColorMode;
-use crate::scene::Scene;
+use crate::scene::{Area, Scene};
 use crate::system::{self, CpuSample};
 
 /// How often the counters are re-read.
@@ -13,23 +14,17 @@ use crate::system::{self, CpuSample};
 /// window it is averaged over: too short and the bar is pure noise.
 const SAMPLE_INTERVAL: f32 = 1.0;
 
-/// Columns each bar occupies, either side of a one-pixel gutter.
-const CPU_COLUMNS: [i32; 4] = [0, 1, 2, 3];
-const MEMORY_COLUMNS: [i32; 4] = [5, 6, 7, 8];
-const GUTTER: i32 = 4;
+/// Rows for the compact form: two bars of two rows, with a rule each.
+const COMPACT_HEIGHT: i32 = 7;
+/// Rows from which the history is drawn instead.
+const HISTORY_HEIGHT: i32 = 16;
 
-/// Rows the bars span, bottom inclusive.
-const BOTTOM: i32 = 33;
-const HEIGHT: i32 = 34;
-/// The same height as a float, so filling a bar needs no cast.
-const HEIGHT_F: f32 = 34.0;
-const _: () = assert!(HEIGHT == 34 && crate::canvas::HEIGHT == 34);
+/// Samples kept, one per column.
+const HISTORY_LEN: usize = 9;
+const _: () = assert!(HISTORY_LEN == 9 && canvas::WIDTH == 9);
 
-/// Brightest at the bottom of a bar, dimmest at the top.
-const FILL_BRIGHTEST: u32 = 255;
-const FILL_DIMMEST: u32 = 70;
-/// The quarter marks drawn down the gutter.
-const TICK_LEVEL: u8 = 30;
+/// The rule under a bar, and the line between the two histories.
+const RULE_LEVEL: u8 = 30;
 
 /// Processor and memory gauges.
 pub struct Gauges {
@@ -37,6 +32,8 @@ pub struct Gauges {
     previous: Option<CpuSample>,
     cpu: f32,
     memory: f32,
+    cpu_history: VecDeque<f32>,
+    memory_history: VecDeque<f32>,
     since_sample: f32,
 }
 
@@ -49,11 +46,13 @@ impl Gauges {
             previous: system::read_cpu(),
             cpu: 0.0,
             memory: system::read_memory().unwrap_or(0.0),
+            cpu_history: VecDeque::from(vec![0.0; HISTORY_LEN]),
+            memory_history: VecDeque::from(vec![0.0; HISTORY_LEN]),
             since_sample: 0.0,
         }
     }
 
-    /// Re-reads the counters.
+    /// Re-reads the counters and pushes them onto the histories.
     fn sample(&mut self) {
         if let Some(now) = system::read_cpu() {
             if let Some(previous) = self.previous {
@@ -66,23 +65,50 @@ impl Gauges {
         if let Some(used) = system::read_memory() {
             self.memory = used;
         }
+
+        for (history, value) in [
+            (&mut self.cpu_history, self.cpu),
+            (&mut self.memory_history, self.memory),
+        ] {
+            history.push_back(value);
+            while history.len() > HISTORY_LEN {
+                history.pop_front();
+            }
+        }
     }
 
-    /// Draws one bar filled to `fraction` of its height.
-    fn draw_bar(&self, canvas: &mut Canvas, columns: [i32; 4], fraction: f32) {
-        let filled = canvas::to_pixel(fraction.clamp(0.0, 1.0) * HEIGHT_F);
-
-        for step in 0..filled {
-            let y = BOTTOM - step;
-            let level = if self.mode == ColorMode::Bw {
-                u8::MAX
-            } else {
-                // A gradient up the bar, so the height reads at a glance even
-                // when the panel is at the edge of vision.
-                fade(step, filled)
-            };
-            for x in columns {
+    /// A load as a bar filling from the left, with its rule underneath.
+    fn draw_bar(canvas: &mut Canvas, area: Area, value: f32, level: u8) {
+        canvas.hline(0, canvas::WIDTH - 1, area.bottom(), RULE_LEVEL);
+        let filled = canvas::to_pixel(value.clamp(0.0, 1.0) * 9.0);
+        for x in 0..filled {
+            for y in area.top..area.bottom() {
                 canvas.set_max(x, y, level);
+            }
+        }
+    }
+
+    /// A history as one column per sample, newest on the right.
+    fn draw_history(&self, canvas: &mut Canvas, area: Area, history: &VecDeque<f32>) {
+        for (x, value) in history.iter().enumerate() {
+            let column = i32::try_from(x).unwrap_or(0);
+            let filled = canvas::to_pixel(
+                value.clamp(0.0, 1.0) * f32::from(u8::try_from(area.height).unwrap_or(1)),
+            );
+            let newest = x + 1 == history.len();
+            for step in 0..filled {
+                let level = if self.mode == ColorMode::Bw {
+                    u8::MAX
+                } else if step == filled - 1 {
+                    // The tip carries the value; the body is only there to
+                    // show where it came from.
+                    if newest { 255 } else { 200 }
+                } else if newest {
+                    150
+                } else {
+                    90
+                };
+                canvas.set_max(column, area.bottom() - step, level);
             }
         }
     }
@@ -93,6 +119,10 @@ impl Scene for Gauges {
         "gauges"
     }
 
+    fn min_height(&self) -> i32 {
+        COMPACT_HEIGHT
+    }
+
     fn update(&mut self, delta: Duration) {
         self.since_sample += delta.as_secs_f32();
         if self.since_sample >= SAMPLE_INTERVAL {
@@ -101,110 +131,147 @@ impl Scene for Gauges {
         }
     }
 
-    fn render(&self, canvas: &mut Canvas) {
-        // Quarter marks, so a half-full bar is readable without counting.
-        if self.mode == ColorMode::Greyscale {
-            for quarter in 1..4 {
-                canvas.set_max(GUTTER, BOTTOM - quarter * HEIGHT / 4, TICK_LEVEL);
-            }
+    fn render(&self, canvas: &mut Canvas, area: Area) {
+        if area.height < HISTORY_HEIGHT {
+            // Two bars, processor over memory, sharing the rows evenly.
+            let half = area.height / 2;
+            Self::draw_bar(canvas, area.take(half), self.cpu, 255);
+            Self::draw_bar(
+                canvas,
+                area.skip(area.height - half).take(half),
+                self.memory,
+                190,
+            );
+            return;
         }
 
-        self.draw_bar(canvas, CPU_COLUMNS, self.cpu);
-        self.draw_bar(canvas, MEMORY_COLUMNS, self.memory);
+        let half = (area.height - 1) / 2;
+        self.draw_history(canvas, area.take(half), &self.cpu_history);
+        canvas.hline(0, canvas::WIDTH - 1, area.row(half), RULE_LEVEL);
+        self.draw_history(
+            canvas,
+            Area {
+                top: area.row(half + 1),
+                height: area.height - half - 1,
+            },
+            &self.memory_history,
+        );
     }
-}
-
-/// Brightness of a bar pixel `step` rows above the bottom of a `filled` bar.
-fn fade(step: i32, filled: i32) -> u8 {
-    let filled = u32::try_from(filled.max(1)).unwrap_or(1);
-    let step = u32::try_from(step).unwrap_or(0).min(filled);
-    let span = FILL_BRIGHTEST - FILL_DIMMEST;
-    let level = FILL_BRIGHTEST - span * step / filled;
-    u8::try_from(level).unwrap_or(u8::MAX)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{BOTTOM, CPU_COLUMNS, Gauges, MEMORY_COLUMNS, fade};
+    use super::{COMPACT_HEIGHT, Gauges, HISTORY_HEIGHT};
     use crate::canvas::Canvas;
     use crate::device::ColorMode;
-    use crate::scene::Scene;
+    use crate::scene::{Area, Scene};
 
-    fn gauges(cpu: f32, memory: f32, mode: ColorMode) -> Gauges {
-        let mut gauges = Gauges::new(mode);
+    fn gauges(cpu: f32, memory: f32) -> Gauges {
+        let mut gauges = Gauges::new(ColorMode::Greyscale);
         gauges.cpu = cpu;
         gauges.memory = memory;
+        for (history, value) in [
+            (&mut gauges.cpu_history, cpu),
+            (&mut gauges.memory_history, memory),
+        ] {
+            history.clear();
+            for _ in 0..super::HISTORY_LEN {
+                history.push_back(value);
+            }
+        }
         gauges
     }
 
-    fn height(canvas: &Canvas, column: i32) -> usize {
-        (0..34).filter(|y| canvas.get(column, *y) > 0).count()
+    fn drawn(gauges: &Gauges, area: Area) -> Canvas {
+        let mut canvas = Canvas::new();
+        gauges.render(&mut canvas, area);
+        canvas
     }
 
     #[test]
-    fn the_bars_fill_from_the_bottom() {
-        let mut canvas = Canvas::new();
-        gauges(0.5, 0.5, ColorMode::Greyscale).render(&mut canvas);
-
-        assert!(
-            canvas.get(CPU_COLUMNS[0], BOTTOM) > 0,
-            "empty at the bottom"
+    fn the_compact_form_gives_each_number_its_own_bar() {
+        let canvas = drawn(
+            &gauges(0.25, 0.75),
+            Area {
+                top: 0,
+                height: COMPACT_HEIGHT,
+            },
         );
-        assert_eq!(canvas.get(CPU_COLUMNS[0], 0), 0, "full to the top at 50%");
+        let width = |row: i32| (0..9).filter(|x| canvas.get(*x, row) > 0).count();
+        // Processor on top, memory below; the wider bar is the larger number.
+        assert!(
+            width(0) < width(4),
+            "cpu {} vs memory {}",
+            width(0),
+            width(4)
+        );
     }
 
     #[test]
-    fn each_bar_tracks_its_own_number() {
-        let mut canvas = Canvas::new();
-        gauges(0.25, 0.75, ColorMode::Greyscale).render(&mut canvas);
+    fn a_taller_area_gets_the_history_instead() {
+        // The compact form fills from the left, the history from the bottom;
+        // a full-height left column is what tells them apart.
+        let busy = gauges(1.0, 1.0);
+        let compact = drawn(
+            &busy,
+            Area {
+                top: 0,
+                height: COMPACT_HEIGHT,
+            },
+        );
+        let tall = drawn(
+            &busy,
+            Area {
+                top: 0,
+                height: HISTORY_HEIGHT,
+            },
+        );
 
-        let cpu = height(&canvas, CPU_COLUMNS[0]);
-        let memory = height(&canvas, MEMORY_COLUMNS[0]);
-        assert!(memory > cpu, "cpu {cpu}, memory {memory}");
-        assert!((7..=11).contains(&cpu), "25% of 34 rows gave {cpu}");
-        assert!((24..=27).contains(&memory), "75% of 34 rows gave {memory}");
+        let column =
+            |canvas: &Canvas, height: i32| (0..height).filter(|y| canvas.get(0, *y) > 0).count();
+        assert!(column(&compact, COMPACT_HEIGHT) < COMPACT_HEIGHT as usize);
+        assert!(column(&tall, HISTORY_HEIGHT) > COMPACT_HEIGHT as usize);
     }
 
     #[test]
-    fn an_idle_machine_draws_no_bar_and_a_busy_one_fills_it() {
-        let mut idle = Canvas::new();
-        gauges(0.0, 0.0, ColorMode::Bw).render(&mut idle);
-        assert_eq!(height(&idle, CPU_COLUMNS[0]), 0);
-
-        let mut busy = Canvas::new();
-        gauges(1.0, 1.0, ColorMode::Bw).render(&mut busy);
-        assert_eq!(height(&busy, CPU_COLUMNS[0]), 34, "a full bar fell short");
-    }
-
-    #[test]
-    fn out_of_range_readings_cannot_overflow_the_panel() {
-        let mut canvas = Canvas::new();
-        gauges(5.0, -1.0, ColorMode::Greyscale).render(&mut canvas);
-        assert_eq!(height(&canvas, CPU_COLUMNS[0]), 34);
-        assert_eq!(height(&canvas, MEMORY_COLUMNS[0]), 0);
-    }
-
-    #[test]
-    fn the_gutter_stays_clear_of_the_bars() {
-        let mut canvas = Canvas::new();
-        gauges(1.0, 1.0, ColorMode::Bw).render(&mut canvas);
-        assert_eq!(height(&canvas, super::GUTTER), 0, "the bars ran together");
-    }
-
-    #[test]
-    fn the_gradient_runs_bright_at_the_bottom_to_dim_at_the_top() {
-        assert!(fade(0, 20) > fade(19, 20));
-        assert_eq!(fade(0, 20), 255);
-        assert!(fade(20, 20) >= 70);
-        assert_eq!(fade(0, 0), 255, "an empty bar must not divide by zero");
-    }
-
-    #[test]
-    fn black_and_white_drops_the_gradient_rather_than_thresholding_it_away() {
-        let mut canvas = Canvas::new();
-        gauges(1.0, 1.0, ColorMode::Bw).render(&mut canvas);
-        for y in 0..34 {
-            assert_eq!(canvas.get(CPU_COLUMNS[0], y), 255, "row {y} was dimmed");
+    fn nothing_is_drawn_outside_the_area() {
+        let busy = gauges(1.0, 1.0);
+        for height in COMPACT_HEIGHT..=34 {
+            for top in [0, (34 - height) / 2, 34 - height] {
+                let canvas = drawn(&busy, Area { top, height });
+                for y in 0..34 {
+                    if y < top || y >= top + height {
+                        for x in 0..9 {
+                            assert_eq!(canvas.get(x, y), 0, "row {y} for {top}+{height}");
+                        }
+                    }
+                }
+            }
         }
+    }
+
+    #[test]
+    fn out_of_range_readings_are_clamped_rather_than_wrapped() {
+        // A counter that goes backwards over a suspend can produce these; a
+        // wrap would paint a full bar for a frame, which reads as a spike.
+        let canvas = drawn(&gauges(5.0, -1.0), Area::FULL);
+        assert!(canvas.get(0, 0) > 0, "500% did not fill its half");
+        assert_eq!(canvas.get(0, 33), 0, "a negative reading drew something");
+    }
+
+    #[test]
+    fn an_idle_machine_draws_almost_nothing() {
+        let canvas = drawn(
+            &gauges(0.0, 0.0),
+            Area {
+                top: 0,
+                height: COMPACT_HEIGHT,
+            },
+        );
+        let filled = (0..9)
+            .flat_map(|x| (0..COMPACT_HEIGHT).map(move |y| (x, y)))
+            .filter(|(x, y)| canvas.get(*x, *y) == 255)
+            .count();
+        assert_eq!(filled, 0, "an idle machine lit a full bar");
     }
 }

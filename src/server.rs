@@ -11,17 +11,17 @@ use tokio::net::{UnixListener, UnixStream};
 use tracing::{debug, info, warn};
 
 use crate::cli::ColorModeChoice;
-use crate::control::{PanelName, Request, Response};
+use crate::control::{PanelName, Request, Response, SceneSpec};
 use crate::runner::Command;
-use crate::scene::{AnyScene, SceneKind};
+use crate::scene::{AnyScene, Stack};
 use crate::state::{self, State};
 
 /// Everything the socket needs to act on a request.
 pub struct Control {
     /// One channel per running panel; a panel started off has no entry.
-    panels: HashMap<PanelName, Sender<Command<AnyScene>>>,
+    panels: HashMap<PanelName, Sender<Command<Stack>>>,
     /// What each panel is showing, for `status`.
-    showing: Mutex<HashMap<PanelName, SceneKind>>,
+    showing: Mutex<HashMap<PanelName, SceneSpec>>,
     /// Colour mode override from the command line.
     color_mode: ColorModeChoice,
     /// Seed for scenes built later, so a seeded run stays reproducible.
@@ -35,8 +35,8 @@ impl Control {
     /// Wraps the panel channels the daemon just started.
     #[must_use]
     pub fn new(
-        panels: HashMap<PanelName, Sender<Command<AnyScene>>>,
-        showing: HashMap<PanelName, SceneKind>,
+        panels: HashMap<PanelName, Sender<Command<Stack>>>,
+        showing: HashMap<PanelName, SceneSpec>,
         color_mode: ColorModeChoice,
         seed: Option<u64>,
         brightness: u8,
@@ -47,7 +47,7 @@ impl Control {
             ..State::default()
         };
         for (panel, scene) in &showing {
-            saved.set_scene(*panel, *scene);
+            saved.set_scene(*panel, scene.clone());
         }
 
         Self {
@@ -69,7 +69,7 @@ impl Control {
             return;
         };
         change(&mut saved);
-        if let Err(error) = state::save(&self.state_path, *saved) {
+        if let Err(error) = state::save(&self.state_path, &saved) {
             warn!(?error, "could not save the setup");
         }
     }
@@ -77,32 +77,45 @@ impl Control {
     /// Carries out one request.
     fn handle(&self, request: Request) -> Response {
         match request {
-            Request::Set { panel, scene } => self.set(panel, scene),
+            Request::Set { panel, scene } => self.set(panel, &scene),
             Request::Brightness(level) => self.brightness(level),
             Request::Status => self.status(),
         }
     }
 
-    /// Switches a panel to another scene.
-    fn set(&self, panel: PanelName, kind: SceneKind) -> Response {
+    /// Switches a panel to another set of scenes.
+    fn set(&self, panel: PanelName, spec: &SceneSpec) -> Response {
         let Some(channel) = self.panels.get(&panel) else {
             return Response::Error(format!(
                 "the {panel} panel is not running; it was started off"
             ));
         };
 
-        let mode = self.color_mode.resolve(kind.preferred_color_mode());
-        let scene = AnyScene::or_blank(kind, self.seed, mode);
+        // A stack takes the colour mode of the scene at its head: mixing a
+        // game and a widget on one panel would otherwise have no answer.
+        let mode = self.color_mode.resolve(
+            spec.scenes()
+                .first()
+                .map_or(crate::device::ColorMode::Greyscale, |kind| {
+                    kind.preferred_color_mode()
+                }),
+        );
+
+        let scene = match AnyScene::stack(spec, self.seed, mode) {
+            Ok(stack) => stack,
+            Err(error) => return Response::Error(error.to_string()),
+        };
 
         if channel.send(Command::SetScene { scene, mode }).is_err() {
             return Response::Error(format!("the {panel} panel has stopped"));
         }
 
         if let Ok(mut showing) = self.showing.lock() {
-            showing.insert(panel, kind);
+            showing.insert(panel, spec.clone());
         }
-        self.remember(|saved| saved.set_scene(panel, kind));
-        Response::Ok(format!("{panel} now shows {kind}"))
+        let remembered = spec.clone();
+        self.remember(move |saved| saved.set_scene(panel, remembered));
+        Response::Ok(format!("{panel} now shows {spec}"))
     }
 
     /// Changes the brightness of every running panel.
@@ -130,10 +143,10 @@ impl Control {
         let report: Vec<String> = PanelName::ALL
             .iter()
             .map(|panel| {
-                let kind = showing
+                let spec = showing
                     .get(panel)
                     .map_or_else(|| "off".to_owned(), ToString::to_string);
-                format!("{panel}={kind}")
+                format!("{panel}={spec}")
             })
             .collect();
         Response::Ok(report.join(" "))
@@ -208,20 +221,20 @@ async fn handle_connection(stream: UnixStream, control: &Control) -> Result<()> 
 mod tests {
     use super::Control;
     use crate::cli::ColorModeChoice;
-    use crate::control::{PanelName, Request, Response};
+    use crate::control::{PanelName, Request, Response, SceneSpec};
     use crate::runner::Command;
-    use crate::scene::SceneKind;
+    use crate::scene::{SceneKind, Stack};
     use std::collections::HashMap;
     use std::sync::mpsc::{Receiver, channel};
 
     /// A control plane with the left panel running and the right one off.
-    fn control() -> (Control, Receiver<Command<crate::scene::AnyScene>>) {
+    fn control() -> (Control, Receiver<Command<Stack>>) {
         let (sender, receiver) = channel();
         let mut panels = HashMap::new();
         panels.insert(PanelName::Left, sender);
 
         let mut showing = HashMap::new();
-        showing.insert(PanelName::Left, SceneKind::Pong);
+        showing.insert(PanelName::Left, SceneSpec::single(SceneKind::Pong));
 
         // A path under the temporary directory: the tests exercise saving, and
         // must not scribble on the real setup.
@@ -247,7 +260,7 @@ mod tests {
 
         let response = control.handle(Request::Set {
             panel: PanelName::Left,
-            scene: SceneKind::Snake,
+            scene: SceneSpec::single(SceneKind::Snake),
         });
 
         assert!(response.succeeded(), "{response}");
@@ -266,7 +279,7 @@ mod tests {
 
         let response = control.handle(Request::Set {
             panel: PanelName::Left,
-            scene: SceneKind::Off,
+            scene: SceneSpec::single(SceneKind::Off),
         });
 
         assert!(response.succeeded(), "{response}");
@@ -282,7 +295,7 @@ mod tests {
 
         let response = control.handle(Request::Set {
             panel: PanelName::Right,
-            scene: SceneKind::Pong,
+            scene: SceneSpec::single(SceneKind::Pong),
         });
 
         assert!(!response.succeeded());
@@ -317,7 +330,7 @@ mod tests {
 
         control.handle(Request::Set {
             panel: PanelName::Left,
-            scene: SceneKind::Snake,
+            scene: SceneSpec::single(SceneKind::Snake),
         });
 
         assert_eq!(
@@ -333,7 +346,7 @@ mod tests {
 
         let response = control.handle(Request::Set {
             panel: PanelName::Left,
-            scene: SceneKind::Snake,
+            scene: SceneSpec::single(SceneKind::Snake),
         });
 
         assert!(!response.succeeded());

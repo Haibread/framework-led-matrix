@@ -8,6 +8,12 @@ USB serial device. `ledmat` renders every frame on the host and pushes raw
 pixels, so a scene can be anything you can draw — the firmware's built-in
 patterns are not involved.
 
+Widgets adapt to the room they are given. A panel shows a stack of one or more
+scenes — `clock,gauges,battery` — and each declares the rows it needs, then
+draws differently depending on what it gets. A clock alone takes the whole
+panel and uses a 4x7 face; the same clock in a stack of three falls back to 3x5
+and drops its seconds bar. One implementation, both renderings.
+
 Colour mode is a property of the scene, not a global setting: a game wants
 motion and takes black and white, while a widget that changes once a second can
 afford the shading. `--color-mode` overrides that per run.
@@ -109,8 +115,16 @@ restart:
 ```bash
 ledmat status
 ledmat set left clock
-ledmat set right gauges
+ledmat set right clock,gauges,battery
 ledmat brightness 60
+```
+
+Scenes separated by commas stack from the top, with a dotted rule between them.
+A stack that cannot fit is refused outright rather than silently truncated:
+
+```
+$ ledmat set left pong,snake
+Error: these scenes need 69 rows and the panel has 34
 ```
 
 `set <panel> off` blanks a panel and keeps its thread — unlike `--left-scene
@@ -208,8 +222,10 @@ covers the rest, and the mocked `Matrix` trait covers the render loop.
 
 ### Adding a scene
 
-1. Implement `Scene` (`name`, `update(delta)`, `render(canvas)`) in
-   `src/scene/<name>.rs`. It gets a cleared canvas and owns nothing else.
+1. Implement `Scene` (`name`, `min_height`, `update(delta)`, `render(canvas,
+   area)`) in `src/scene/<name>.rs`. Draw relative to `area.top`, never past
+   `area.bottom()`, and use `area.height` to decide how much detail to show —
+   a widget that overflows its band scribbles on its neighbour.
 2. Add it to `SceneKind` and `AnyScene` in `src/scene.rs`, and give it a colour
    mode in `SceneKind::preferred_color_mode`. Anything that changes more than a
    few times a second wants `Bw`; a widget wants `Greyscale`, which costs
