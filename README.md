@@ -165,8 +165,8 @@ Every option can be set as a flag or an environment variable. Flags win.
 | --- | --- | --- | --- |
 | `--left-device` | `LEFT_DEVICE` | `/dev/led-matrix-left` | Serial device of the left module |
 | `--right-device` | `RIGHT_DEVICE` | `/dev/led-matrix-right` | Serial device of the right module |
-| `--left-scene` | `LEFT_SCENE` | saved, else `pong` | `pong`, `snake`, `clock`, `gauges`, `battery` or `off` |
-| `--right-scene` | `RIGHT_SCENE` | saved, else `snake` | `pong`, `snake`, `clock`, `gauges`, `battery` or `off` |
+| `--left-scene` | `LEFT_SCENE` | saved, else `pong` | one or more scenes, comma separated |
+| `--right-scene` | `RIGHT_SCENE` | saved, else `snake` | one or more scenes, comma separated |
 | `--brightness` | `BRIGHTNESS` | saved, else `30` | 0 to 255; the modules sit under your hands, past ~80 is a desk lamp |
 | `--fps` | `FPS` | `30` | 1 to 60 |
 | `--color-mode` | `COLOR_MODE` | `auto` | `auto` (per scene), `greyscale` (shading, ~6 fps) or `bw` (no shading, ~30 fps) |

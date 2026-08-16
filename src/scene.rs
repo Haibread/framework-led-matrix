@@ -5,9 +5,11 @@
 
 pub mod battery;
 pub mod clock;
-pub mod gauges;
+pub mod load;
 pub mod pong;
 pub mod snake;
+pub mod tetris;
+pub mod traffic;
 
 use std::fmt;
 use std::time::Duration;
@@ -19,9 +21,11 @@ use crate::canvas::{self, Canvas};
 use crate::device::ColorMode;
 use battery::BatteryGauge;
 use clock::Clock;
-use gauges::Gauges;
+use load::{Load, Source};
 use pong::Pong;
 use snake::Snake;
+use tetris::Tetris;
+use traffic::Traffic;
 
 /// A horizontal band of the panel, which is all a scene is allowed to touch.
 ///
@@ -53,24 +57,6 @@ impl Area {
     #[must_use]
     pub const fn bottom(self) -> i32 {
         self.top + self.height - 1
-    }
-
-    /// The area with `rows` taken off the top.
-    #[must_use]
-    pub const fn skip(self, rows: i32) -> Self {
-        Self {
-            top: self.top + rows,
-            height: self.height - rows,
-        }
-    }
-
-    /// The top `rows` of the area.
-    #[must_use]
-    pub const fn take(self, rows: i32) -> Self {
-        Self {
-            top: self.top,
-            height: rows,
-        }
     }
 
     /// The area centred on its own middle, keeping only `rows`.
@@ -109,10 +95,18 @@ pub enum SceneKind {
     Pong,
     /// Snake, played by a robot that plans ahead.
     Snake,
+    /// Tetris, played by a robot that scores every landing.
+    Tetris,
     /// The time of day, hours stacked over minutes.
     Clock,
-    /// Processor and memory load, as two bars.
-    Gauges,
+    /// Share of processor time in use.
+    Cpu,
+    /// Share of memory in use.
+    Ram,
+    /// Bytes over the network, in and out.
+    Net,
+    /// Bytes to and from the disks.
+    Disk,
     /// Charge level, drawn as a battery.
     Battery,
     /// Nothing; the panel stays dark and is left alone.
@@ -129,10 +123,16 @@ impl SceneKind {
     #[must_use]
     pub fn preferred_color_mode(self) -> ColorMode {
         match self {
-            Self::Pong | Self::Snake => ColorMode::Bw,
+            Self::Pong | Self::Snake | Self::Tetris => ColorMode::Bw,
             // Widgets change a few times a minute at most, and an unchanged
             // frame is never resent, so their shading is effectively free.
-            Self::Clock | Self::Gauges | Self::Battery | Self::Off => ColorMode::Greyscale,
+            Self::Clock
+            | Self::Cpu
+            | Self::Ram
+            | Self::Net
+            | Self::Disk
+            | Self::Battery
+            | Self::Off => ColorMode::Greyscale,
         }
     }
 }
@@ -142,8 +142,12 @@ impl fmt::Display for SceneKind {
         let name = match self {
             Self::Pong => "pong",
             Self::Snake => "snake",
+            Self::Tetris => "tetris",
             Self::Clock => "clock",
-            Self::Gauges => "gauges",
+            Self::Cpu => "cpu",
+            Self::Ram => "ram",
+            Self::Net => "net",
+            Self::Disk => "disk",
             Self::Battery => "battery",
             Self::Off => "off",
         };
@@ -165,10 +169,14 @@ pub enum AnyScene {
     Pong(Pong),
     /// See [`Snake`].
     Snake(Snake),
+    /// See [`Tetris`].
+    Tetris(Tetris),
     /// See [`Clock`].
     Clock(Clock),
-    /// See [`Gauges`].
-    Gauges(Gauges),
+    /// See [`Load`].
+    Load(Load),
+    /// See [`Traffic`].
+    Traffic(Traffic),
     /// See [`BatteryGauge`].
     Battery(BatteryGauge),
     /// Nothing at all, for a panel switched off while the daemon runs.
@@ -187,8 +195,12 @@ impl AnyScene {
         match kind {
             SceneKind::Pong => Some(Self::Pong(Pong::new(seed, mode))),
             SceneKind::Snake => Some(Self::Snake(Snake::new(seed, mode))),
+            SceneKind::Tetris => Some(Self::Tetris(Tetris::new(seed, mode))),
             SceneKind::Clock => Some(Self::Clock(Clock::new(mode))),
-            SceneKind::Gauges => Some(Self::Gauges(Gauges::new(mode))),
+            SceneKind::Cpu => Some(Self::Load(Load::new(Source::Cpu, mode))),
+            SceneKind::Ram => Some(Self::Load(Load::new(Source::Memory, mode))),
+            SceneKind::Net => Some(Self::Traffic(Traffic::new(traffic::Source::Network, mode))),
+            SceneKind::Disk => Some(Self::Traffic(Traffic::new(traffic::Source::Disk, mode))),
             SceneKind::Battery => Some(Self::Battery(BatteryGauge::new(mode))),
             SceneKind::Off => None,
         }
@@ -228,8 +240,10 @@ impl Scene for AnyScene {
         match self {
             Self::Pong(scene) => scene.min_height(),
             Self::Snake(scene) => scene.min_height(),
+            Self::Tetris(scene) => scene.min_height(),
             Self::Clock(scene) => scene.min_height(),
-            Self::Gauges(scene) => scene.min_height(),
+            Self::Load(scene) => scene.min_height(),
+            Self::Traffic(scene) => scene.min_height(),
             Self::Battery(scene) => scene.min_height(),
             Self::Blank => 1,
         }
@@ -239,8 +253,10 @@ impl Scene for AnyScene {
         match self {
             Self::Pong(scene) => scene.name(),
             Self::Snake(scene) => scene.name(),
+            Self::Tetris(scene) => scene.name(),
             Self::Clock(scene) => scene.name(),
-            Self::Gauges(scene) => scene.name(),
+            Self::Load(scene) => scene.name(),
+            Self::Traffic(scene) => scene.name(),
             Self::Battery(scene) => scene.name(),
             Self::Blank => "off",
         }
@@ -250,8 +266,10 @@ impl Scene for AnyScene {
         match self {
             Self::Pong(scene) => scene.update(delta),
             Self::Snake(scene) => scene.update(delta),
+            Self::Tetris(scene) => scene.update(delta),
             Self::Clock(scene) => scene.update(delta),
-            Self::Gauges(scene) => scene.update(delta),
+            Self::Load(scene) => scene.update(delta),
+            Self::Traffic(scene) => scene.update(delta),
             Self::Battery(scene) => scene.update(delta),
             Self::Blank => {}
         }
@@ -261,8 +279,10 @@ impl Scene for AnyScene {
         match self {
             Self::Pong(scene) => scene.render(canvas, area),
             Self::Snake(scene) => scene.render(canvas, area),
+            Self::Tetris(scene) => scene.render(canvas, area),
             Self::Clock(scene) => scene.render(canvas, area),
-            Self::Gauges(scene) => scene.render(canvas, area),
+            Self::Load(scene) => scene.render(canvas, area),
+            Self::Traffic(scene) => scene.render(canvas, area),
             Self::Battery(scene) => scene.render(canvas, area),
             Self::Blank => {}
         }
@@ -428,7 +448,7 @@ mod tests {
 
     #[test]
     fn a_stack_splits_the_panel_without_gaps_or_overlaps() {
-        let kinds = [SceneKind::Clock, SceneKind::Gauges, SceneKind::Battery];
+        let kinds = [SceneKind::Clock, SceneKind::Cpu, SceneKind::Battery];
         let stack = stack_of(&kinds).expect("stack");
         let areas = stack.layout();
 

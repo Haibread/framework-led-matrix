@@ -178,7 +178,7 @@ mod tests {
     fn an_unknown_scene_costs_only_its_own_key() {
         // A state file written by a newer version, or edited by hand, must not
         // take the rest of the settings down with it.
-        let state = parse("left=tetris\nright=snake\nbrightness=30\n");
+        let state = parse("left=asteroids\nright=snake\nbrightness=30\n");
         assert_eq!(state.left, None);
         assert_eq!(state.right, Some(SceneSpec::single(SceneKind::Snake)));
         assert_eq!(state.brightness, Some(30));
@@ -193,8 +193,8 @@ mod tests {
 
     #[test]
     fn whitespace_around_keys_and_values_is_tolerated() {
-        let state = parse("  left =  gauges  \n\tbrightness\t=\t7\n");
-        assert_eq!(state.left, Some(SceneSpec::single(SceneKind::Gauges)));
+        let state = parse("  left =  cpu  \n\tbrightness\t=\t7\n");
+        assert_eq!(state.left, Some(SceneSpec::single(SceneKind::Cpu)));
         assert_eq!(state.brightness, Some(7));
     }
 

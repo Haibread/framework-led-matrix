@@ -13,6 +13,127 @@ const PROC_STAT: &str = "/proc/stat";
 const PROC_MEMINFO: &str = "/proc/meminfo";
 /// Where the kernel reports power supplies.
 const POWER_SUPPLY: &str = "/sys/class/power_supply";
+/// Where the kernel reports network interfaces.
+const PROC_NET_DEV: &str = "/proc/net/dev";
+/// Where the kernel reports block devices.
+const PROC_DISKSTATS: &str = "/proc/diskstats";
+
+/// Bytes counted in each direction since boot.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Counters {
+    /// Bytes sent, or written.
+    pub out: u64,
+    /// Bytes received, or read.
+    pub incoming: u64,
+}
+
+impl Counters {
+    /// Bytes a second in each direction between two readings.
+    ///
+    /// A counter that went backwards — a suspend, an interface coming back —
+    /// reads as nothing rather than as an enormous burst.
+    #[must_use]
+    pub fn rates_since(self, earlier: Self, seconds: f64) -> (f64, f64) {
+        if seconds <= 0.0 {
+            return (0.0, 0.0);
+        }
+        let rate = |now: u64, before: u64| {
+            // A byte count that needs more than 52 bits of precision is an
+            // exabyte in one sample; the rounding is irrelevant either way.
+            #[allow(
+                clippy::cast_precision_loss,
+                reason = "byte counters never reach the mantissa's limit in practice"
+            )]
+            now.checked_sub(before)
+                .map_or(0.0, |delta| delta as f64 / seconds)
+        };
+        (
+            rate(self.out, earlier.out),
+            rate(self.incoming, earlier.incoming),
+        )
+    }
+}
+
+/// Sums the byte counters of every real network interface.
+///
+/// The loopback is skipped: it carries every local connection and would drown
+/// out the link you actually care about.
+#[must_use]
+pub fn parse_network(dev: &str) -> Counters {
+    let mut totals = Counters::default();
+    for line in dev.lines().skip(2) {
+        let Some((name, rest)) = line.split_once(':') else {
+            continue;
+        };
+        if name.trim() == "lo" {
+            continue;
+        }
+        let fields: Vec<u64> = rest
+            .split_whitespace()
+            .map(|field| field.parse().unwrap_or(0))
+            .collect();
+        // receive bytes first, then eight more receive fields before transmit.
+        totals.incoming += fields.first().copied().unwrap_or(0);
+        totals.out += fields.get(8).copied().unwrap_or(0);
+    }
+    totals
+}
+
+/// Sums the sector counters of every whole disk.
+#[must_use]
+pub fn parse_disk(diskstats: &str) -> Counters {
+    /// The kernel reports these in 512-byte sectors whatever the device says.
+    const SECTOR: u64 = 512;
+
+    let mut totals = Counters::default();
+    for line in diskstats.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let (Some(name), Some(read), Some(written)) = (fields.get(2), fields.get(5), fields.get(9))
+        else {
+            continue;
+        };
+        if !is_whole_disk(name) {
+            continue;
+        }
+        totals.incoming += read.parse::<u64>().unwrap_or(0) * SECTOR;
+        totals.out += written.parse::<u64>().unwrap_or(0) * SECTOR;
+    }
+    totals
+}
+
+/// Whether a block device is a disk rather than one of its partitions.
+///
+/// Counting both would double every byte, since a partition's traffic is also
+/// counted against its disk.
+#[must_use]
+pub fn is_whole_disk(name: &str) -> bool {
+    if name.starts_with("loop") || name.starts_with("ram") || name.starts_with("zram") {
+        return false;
+    }
+    if let Some(rest) = name.strip_prefix("nvme") {
+        // nvme0n1 is a disk, nvme0n1p2 is a partition.
+        return !rest.contains('p');
+    }
+    if name.starts_with("sd") || name.starts_with("hd") || name.starts_with("vd") {
+        return !name.ends_with(|c: char| c.is_ascii_digit());
+    }
+    if name.starts_with("mmcblk") {
+        return !name.contains('p');
+    }
+    true
+}
+
+/// Reads the network counters.
+#[must_use]
+pub fn read_network() -> Option<Counters> {
+    Some(parse_network(&fs::read_to_string(PROC_NET_DEV).ok()?))
+}
+
+/// Reads the disk counters.
+#[must_use]
+pub fn read_disk() -> Option<Counters> {
+    Some(parse_disk(&fs::read_to_string(PROC_DISKSTATS).ok()?))
+}
 
 /// A reading of cumulative processor time.
 ///
@@ -151,7 +272,9 @@ fn ratio(part: u64, whole: u64) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_battery, parse_cpu, parse_memory, ratio};
+    use super::{
+        is_whole_disk, parse_battery, parse_cpu, parse_disk, parse_memory, parse_network, ratio,
+    };
 
     /// Real output, kept verbatim so a kernel format change would show up here.
     const STAT: &str = "cpu  535580 9822 144780 5599014 4777 38597 17644 0 0 0
@@ -223,6 +346,84 @@ Buffers:          123456 kB
         assert!(parse_battery("100", "Full").expect("parse").charging);
         assert_eq!(parse_battery("255", "Full").expect("parse").capacity, 100);
         assert!(parse_battery("", "Full").is_none());
+    }
+
+    /// Real output, trimmed but otherwise verbatim.
+    const NET_DEV: &str = "Inter-|   Receive                       |  Transmit
+ face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed
+    lo:  202624    2185    0    0    0     0          0         0   202624    2185    0    0    0     0       0          0
+  wlan0: 5000000   1000    0    0    0     0          0         0  2000000     900    0    0    0     0       0          0
+";
+
+    const DISKSTATS: &str = "   7       0 loop0 10 0 20 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+ 259       0 nvme0n1 235654 17426 16758963 107217 773498 12679 38410756 1095631 0 0 0 0 0 0 0 0 0
+ 259       1 nvme0n1p1 4119 6609 606755 1479 281 13 10052 458 0 0 0 0 0 0 0 0 0
+";
+
+    #[test]
+    fn the_loopback_is_left_out_of_the_network_total() {
+        // Every local connection goes over lo; counting it would drown out the
+        // link you actually care about.
+        let counters = parse_network(NET_DEV);
+        assert_eq!(counters.incoming, 5_000_000, "lo was counted");
+        assert_eq!(counters.out, 2_000_000);
+    }
+
+    #[test]
+    fn a_partition_is_not_counted_alongside_its_disk() {
+        // The kernel counts a partition's traffic against its disk as well, so
+        // adding both would double every byte.
+        let counters = parse_disk(DISKSTATS);
+        assert_eq!(
+            counters.incoming,
+            16_758_963 * 512,
+            "a partition slipped in"
+        );
+        assert_eq!(counters.out, 38_410_756 * 512);
+    }
+
+    #[test]
+    fn whole_disks_are_told_apart_from_their_partitions() {
+        for whole in ["nvme0n1", "sda", "vdb", "mmcblk0", "dm-0"] {
+            assert!(is_whole_disk(whole), "{whole} was taken for a partition");
+        }
+        for part in ["nvme0n1p1", "sda1", "mmcblk0p2", "loop0", "ram3", "zram0"] {
+            assert!(!is_whole_disk(part), "{part} was taken for a disk");
+        }
+    }
+
+    #[test]
+    fn a_counter_going_backwards_reads_as_nothing() {
+        // Suspending, or an interface coming back, resets these. Wrapping the
+        // subtraction would paint a full-scale burst.
+        let now = super::Counters {
+            out: 10,
+            incoming: 10,
+        };
+        let later = super::Counters {
+            out: 1_000,
+            incoming: 1_000,
+        };
+        assert_eq!(now.rates_since(later, 1.0), (0.0, 0.0));
+        assert_eq!(later.rates_since(now, 1.0), (990.0, 990.0));
+        assert_eq!(
+            later.rates_since(now, 0.0),
+            (0.0, 0.0),
+            "no division by zero"
+        );
+    }
+
+    #[test]
+    fn rates_are_per_second_not_per_sample() {
+        let before = super::Counters {
+            out: 0,
+            incoming: 0,
+        };
+        let after = super::Counters {
+            out: 100,
+            incoming: 200,
+        };
+        assert_eq!(after.rates_since(before, 2.0), (50.0, 100.0));
     }
 
     #[test]

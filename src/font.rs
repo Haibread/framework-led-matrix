@@ -5,7 +5,6 @@ use crate::canvas::Canvas;
 /// Width of one small glyph, in pixels.
 pub const GLYPH_WIDTH: i32 = 3;
 /// Height of one small glyph, in pixels.
-#[cfg(test)]
 pub const GLYPH_HEIGHT: i32 = 5;
 
 /// Which face to draw with.

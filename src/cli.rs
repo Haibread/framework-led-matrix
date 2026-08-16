@@ -249,14 +249,14 @@ mod tests {
     fn the_saved_setup_wins_over_the_defaults() {
         let cli = Cli::parse_from(["ledmat"]);
         let saved = crate::state::State {
-            left: Some(SceneSpec::single(SceneKind::Gauges)),
+            left: Some(SceneSpec::single(SceneKind::Cpu)),
             right: None,
             brightness: Some(7),
         };
 
         assert_eq!(
             cli.scene_for(PanelName::Left, &saved),
-            SceneSpec::single(SceneKind::Gauges)
+            SceneSpec::single(SceneKind::Cpu)
         );
         assert_eq!(cli.brightness_for(&saved), 7);
         // Nothing asked and nothing saved: the default.
@@ -290,7 +290,7 @@ mod tests {
 
     #[test]
     fn an_unknown_scene_is_rejected() {
-        assert!(Cli::try_parse_from(["ledmat", "--left-scene", "tetris"]).is_err());
+        assert!(Cli::try_parse_from(["ledmat", "--left-scene", "asteroids"]).is_err());
     }
 
     #[test]

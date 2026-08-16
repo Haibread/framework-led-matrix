@@ -154,12 +154,18 @@ pub fn scene_from_str(name: &str) -> Result<SceneKind> {
     match name {
         "pong" => Ok(SceneKind::Pong),
         "snake" => Ok(SceneKind::Snake),
+        "tetris" => Ok(SceneKind::Tetris),
         "clock" => Ok(SceneKind::Clock),
-        "gauges" => Ok(SceneKind::Gauges),
+        "cpu" => Ok(SceneKind::Cpu),
+        "ram" => Ok(SceneKind::Ram),
+        "net" => Ok(SceneKind::Net),
+        "disk" => Ok(SceneKind::Disk),
         "battery" => Ok(SceneKind::Battery),
         "off" => Ok(SceneKind::Off),
         other => {
-            bail!("unknown scene {other:?}, expected pong, snake, clock, gauges, battery or off")
+            bail!(
+                "unknown scene {other:?}, expected pong, snake, tetris, clock, cpu, ram, net, disk, battery or off"
+            )
         }
     }
 }
@@ -222,9 +228,9 @@ mod tests {
     fn a_stack_survives_a_round_trip() {
         // The spec is what the socket, the command line and the saved state all
         // speak, so one spelling has to serve all three.
-        let spec: SceneSpec = "clock,gauges,battery".parse().expect("parse");
+        let spec: SceneSpec = "clock,cpu,battery".parse().expect("parse");
         assert_eq!(spec.scenes().len(), 3);
-        assert_eq!(spec.to_string(), "clock,gauges,battery");
+        assert_eq!(spec.to_string(), "clock,cpu,battery");
         assert_eq!(spec.to_string().parse::<SceneSpec>().unwrap(), spec);
     }
 
@@ -232,7 +238,7 @@ mod tests {
     fn a_spec_with_no_scene_is_refused() {
         assert!("".parse::<SceneSpec>().is_err());
         assert!(",,".parse::<SceneSpec>().is_err());
-        assert!("clock,tetris".parse::<SceneSpec>().is_err());
+        assert!("clock,asteroids".parse::<SceneSpec>().is_err());
     }
 
     #[test]
@@ -290,7 +296,7 @@ mod tests {
             ("wibble", "unknown command"),
             ("set left", "needs a panel and a scene"),
             ("set middle pong", "unknown panel"),
-            ("set left tetris", "unknown scene"),
+            ("set left asteroids", "unknown scene"),
             ("brightness", "needs a level"),
             ("brightness loud", "invalid digit"),
         ];
