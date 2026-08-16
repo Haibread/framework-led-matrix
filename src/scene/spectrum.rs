@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use crate::audio::{BANDS, Listener};
+use crate::audio::{BANDS, Listener, Source};
 use crate::canvas::{self, Canvas};
 use crate::device::ColorMode;
 use crate::scene::{Area, Scene};
@@ -21,6 +21,7 @@ const PEAK_FALL: f32 = 0.55;
 /// An audio spectrum.
 pub struct Spectrum {
     mode: ColorMode,
+    source: Source,
     listener: Listener,
     /// The highest each band has reached lately, so a peak lingers.
     peaks: [f32; BANDS],
@@ -29,10 +30,11 @@ pub struct Spectrum {
 impl Spectrum {
     /// Starts the widget and its capture.
     #[must_use]
-    pub fn new(mode: ColorMode) -> Self {
+    pub fn new(source: Source, mode: ColorMode) -> Self {
         Self {
             mode,
-            listener: Listener::start(),
+            source,
+            listener: Listener::start(source),
             peaks: [0.0; BANDS],
         }
     }
@@ -40,7 +42,10 @@ impl Spectrum {
 
 impl Scene for Spectrum {
     fn name(&self) -> &'static str {
-        "spectrum"
+        match self.source {
+            Source::Output => "spectrum",
+            Source::Input => "mic",
+        }
     }
 
     fn min_height(&self) -> i32 {
@@ -101,7 +106,7 @@ mod tests {
 
     /// A spectrum whose capture is ignored, so the tests set the levels.
     fn showing(peaks: [f32; BANDS]) -> Spectrum {
-        let mut spectrum = Spectrum::new(ColorMode::Greyscale);
+        let mut spectrum = Spectrum::new(super::Source::Output, ColorMode::Greyscale);
         spectrum.peaks = peaks;
         spectrum
     }
@@ -155,6 +160,20 @@ mod tests {
             .filter(|x| (0..20).any(|y| canvas.get(*x, y) > 0))
             .count();
         assert_eq!(lit, 9, "the peak markers did not show");
+    }
+
+    #[test]
+    fn the_two_sources_are_named_apart() {
+        // They are the same widget pointed at different devices, and the name
+        // is what says which — a spectrum of silence looks like a broken one.
+        assert_eq!(
+            Spectrum::new(super::Source::Output, ColorMode::Bw).name(),
+            "spectrum"
+        );
+        assert_eq!(
+            Spectrum::new(super::Source::Input, ColorMode::Bw).name(),
+            "mic"
+        );
     }
 
     #[test]

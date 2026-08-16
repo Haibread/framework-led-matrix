@@ -119,6 +119,8 @@ pub enum SceneKind {
     Media,
     /// Nine bands of whatever is coming out of the speakers.
     Spectrum,
+    /// The same, listening to the microphone instead.
+    Mic,
     /// Charge level, drawn as a battery.
     Battery,
     /// Nothing; the panel stays dark and is left alone.
@@ -135,7 +137,7 @@ impl SceneKind {
     #[must_use]
     pub fn preferred_color_mode(self) -> ColorMode {
         match self {
-            Self::Pong | Self::Snake | Self::Tetris | Self::Spectrum => ColorMode::Bw,
+            Self::Pong | Self::Snake | Self::Tetris | Self::Spectrum | Self::Mic => ColorMode::Bw,
             // Widgets change a few times a minute at most, and an unchanged
             // frame is never resent, so their shading is effectively free.
             Self::Clock
@@ -165,6 +167,7 @@ impl fmt::Display for SceneKind {
             Self::Volume => "volume",
             Self::Media => "media",
             Self::Spectrum => "spectrum",
+            Self::Mic => "mic",
             Self::Battery => "battery",
             Self::Off => "off",
         };
@@ -226,7 +229,14 @@ impl AnyScene {
             SceneKind::Disk => Some(Self::Traffic(Traffic::new(traffic::Source::Disk, mode))),
             SceneKind::Volume => Some(Self::Volume(Volume::new(mode))),
             SceneKind::Media => Some(Self::Media(Media::new(mode))),
-            SceneKind::Spectrum => Some(Self::Spectrum(Spectrum::new(mode))),
+            SceneKind::Spectrum => Some(Self::Spectrum(Spectrum::new(
+                crate::audio::Source::Output,
+                mode,
+            ))),
+            SceneKind::Mic => Some(Self::Spectrum(Spectrum::new(
+                crate::audio::Source::Input,
+                mode,
+            ))),
             SceneKind::Battery => Some(Self::Battery(BatteryGauge::new(mode))),
             SceneKind::Off => None,
         }

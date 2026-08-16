@@ -52,6 +52,28 @@ const FLOOR_DB: f32 = -60.0;
 const ATTACK: f32 = 0.6;
 const DECAY: f32 = 0.12;
 
+/// Where the sound is taken from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Source {
+    /// What the machine is playing, through the default sink's monitor.
+    Output,
+    /// What the microphone hears.
+    Input,
+}
+
+impl Source {
+    /// The device `parec` should be pointed at.
+    ///
+    /// Both are resolved by the sound server rather than named outright, so
+    /// changing the default output or input takes effect on the next capture.
+    const fn device(self) -> &'static str {
+        match self {
+            Self::Output => "--device=@DEFAULT_MONITOR@",
+            Self::Input => "--device=@DEFAULT_SOURCE@",
+        }
+    }
+}
+
 /// The latest band levels, published by the capture thread.
 pub struct Listener {
     bands: Arc<Mutex<[f32; BANDS]>>,
@@ -60,9 +82,9 @@ pub struct Listener {
 }
 
 impl Listener {
-    /// Starts capturing and analysing, on its own thread.
+    /// Starts capturing `source` and analysing it, on its own thread.
     #[must_use]
-    pub fn start() -> Self {
+    pub fn start(source: Source) -> Self {
         let bands = Arc::new(Mutex::new([0.0; BANDS]));
         let stop = Arc::new(AtomicBool::new(false));
         let child = Arc::new(Mutex::new(None));
@@ -74,7 +96,7 @@ impl Listener {
         };
 
         thread::spawn(move || {
-            if let Err(error) = capture(&bands, &stop, &child) {
+            if let Err(error) = capture(source, &bands, &stop, &child) {
                 warn!(?error, "audio capture stopped");
             }
         });
@@ -104,13 +126,14 @@ impl Drop for Listener {
 
 /// Runs the capture loop until told to stop.
 fn capture(
+    source: Source,
     bands: &Arc<Mutex<[f32; BANDS]>>,
     stop: &Arc<AtomicBool>,
     holder: &Arc<Mutex<Option<Child>>>,
 ) -> std::io::Result<()> {
     let mut child = Command::new("parec")
         .args([
-            "--device=@DEFAULT_MONITOR@",
+            source.device(),
             "--format=s16le",
             &format!("--rate={SAMPLE_RATE}"),
             "--channels=1",
@@ -125,7 +148,7 @@ fn capture(
     if let Ok(mut slot) = holder.lock() {
         *slot = Some(child);
     }
-    debug!("audio capture started");
+    debug!(?source, "audio capture started");
 
     let mut planner = FftPlanner::new();
     let fft = planner.plan_fft_forward(WINDOW);
