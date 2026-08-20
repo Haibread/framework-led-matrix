@@ -67,6 +67,8 @@ pub enum Command {
     },
     /// Report what each panel is showing
     Status,
+    /// Compose the panels while watching them
+    Tui,
 }
 
 /// Drive the Framework 16 LED Matrix modules.
@@ -80,8 +82,10 @@ pub struct Cli {
     /// Control socket the daemon listens on
     ///
     /// Defaults to `ledmat.sock` inside `XDG_RUNTIME_DIR`, falling back to the
-    /// current directory when that is unset.
-    #[arg(long, env = "SOCKET_PATH")]
+    /// current directory when that is unset. Global, so it can be given after a
+    /// subcommand as well as before — `ledmat set left clock --socket …` reads
+    /// naturally and used to be refused.
+    #[arg(long, env = "SOCKET_PATH", global = true)]
     pub socket: Option<PathBuf>,
 
     /// Serial device of the left module
@@ -200,7 +204,7 @@ impl Cli {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, ColorModeChoice};
+    use super::{Cli, ColorModeChoice, PathBuf};
     use crate::control::{PanelName, SceneSpec};
     use crate::device::ColorMode;
     use crate::scene::SceneKind;
@@ -317,6 +321,15 @@ mod tests {
             Cli::parse_from(["ledmat"]).color_mode,
             ColorModeChoice::Auto
         );
+    }
+
+    #[test]
+    fn the_socket_can_be_given_after_a_subcommand() {
+        // Anything that is not a global argument has to come before the
+        // subcommand, which is not where a person writes it.
+        let cli = Cli::parse_from(["ledmat", "status", "--socket", "/tmp/x.sock"]);
+        assert_eq!(cli.socket, Some(PathBuf::from("/tmp/x.sock")));
+        assert!(matches!(cli.command, Some(super::Command::Status)));
     }
 
     #[test]

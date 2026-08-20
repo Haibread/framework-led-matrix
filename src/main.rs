@@ -17,14 +17,15 @@ mod scene;
 mod server;
 mod state;
 mod system;
+mod tui;
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::channel;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -57,6 +58,9 @@ struct PanelSpec {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    if let Some(cli::Command::Tui) = &cli.command {
+        return tui::run(cli.socket_path());
+    }
     if let Some(command) = &cli.command {
         return send(&cli.socket_path(), &request_for(command));
     }
@@ -89,6 +93,7 @@ async fn main() -> Result<()> {
     let shutdown = Arc::new(AtomicBool::new(false));
     let mut panels = JoinSet::new();
     let mut channels = HashMap::new();
+    let mut mirrors = HashMap::new();
     let mut showing = HashMap::new();
 
     for (index, spec) in specs.into_iter().enumerate() {
@@ -122,11 +127,15 @@ async fn main() -> Result<()> {
 
         let (sender, commands) = channel();
         channels.insert(spec.name, sender);
+        let mirror = Arc::new(Mutex::new(canvas::Canvas::new()));
+        mirrors.insert(spec.name, Arc::clone(&mirror));
         showing.insert(spec.name, spec.scene.clone());
 
         // The serial writes are blocking, so each panel owns a blocking thread
         // rather than pretending to be async.
-        panels.spawn_blocking(move || runner::run_panel(settings, open, scene, &commands, &stop));
+        panels.spawn_blocking(move || {
+            runner::run_panel(settings, open, scene, &commands, &mirror, &stop)
+        });
     }
 
     if panels.is_empty() {
@@ -140,6 +149,7 @@ async fn main() -> Result<()> {
         showing,
         cli.color_mode,
         cli.seed,
+        mirrors,
         brightness,
         state_path,
     );
@@ -206,7 +216,9 @@ fn request_for(command: &cli::Command) -> Request {
             scene: scene.clone(),
         },
         cli::Command::Brightness { level } => Request::Brightness(*level),
-        cli::Command::Status => Request::Status,
+        // The interface never reaches here; it is handled before this, and
+        // asking a daemon for its status is the harmless thing to do anyway.
+        cli::Command::Status | cli::Command::Tui => Request::Status,
     }
 }
 

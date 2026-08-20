@@ -16,7 +16,7 @@ use crate::system::{self, Battery as Reading};
 const SAMPLE_INTERVAL: f32 = 5.0;
 
 /// Rows for the battery lying down, terminal included.
-const COMPACT_HEIGHT: i32 = 5;
+pub const MIN_HEIGHT: i32 = 5;
 /// Rows from which it stands up instead.
 const UPRIGHT_HEIGHT: i32 = 20;
 
@@ -124,7 +124,7 @@ impl Scene for BatteryGauge {
     }
 
     fn min_height(&self) -> i32 {
-        COMPACT_HEIGHT
+        MIN_HEIGHT
     }
 
     fn update(&mut self, delta: Duration) {
@@ -143,14 +143,14 @@ impl Scene for BatteryGauge {
         if area.height >= UPRIGHT_HEIGHT {
             self.draw_upright(canvas, area, self.reading);
         } else {
-            Self::draw_lying(canvas, area.centred(COMPACT_HEIGHT), self.reading);
+            Self::draw_lying(canvas, area.centred(MIN_HEIGHT), self.reading);
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{BatteryGauge, COMPACT_HEIGHT, UPRIGHT_HEIGHT};
+    use super::{BatteryGauge, MIN_HEIGHT, UPRIGHT_HEIGHT};
     use crate::canvas::Canvas;
     use crate::device::ColorMode;
     use crate::scene::{Area, Scene};
@@ -170,7 +170,7 @@ mod tests {
 
     #[test]
     fn the_case_is_drawn_whatever_the_charge() {
-        for height in [COMPACT_HEIGHT, UPRIGHT_HEIGHT, 34] {
+        for height in [MIN_HEIGHT, UPRIGHT_HEIGHT, 34] {
             let canvas = drawn(&gauge(0, false), Area { top: 0, height });
             assert_ne!(canvas, Canvas::new(), "no case at height {height}");
         }
@@ -200,7 +200,7 @@ mod tests {
             &gauge(100, false),
             Area {
                 top: 0,
-                height: COMPACT_HEIGHT,
+                height: MIN_HEIGHT,
             },
         );
         let upright = drawn(
@@ -218,7 +218,7 @@ mod tests {
     #[test]
     fn nothing_is_drawn_outside_the_area() {
         let full = gauge(100, true);
-        for height in COMPACT_HEIGHT..=34 {
+        for height in MIN_HEIGHT..=34 {
             for top in [0, (34 - height) / 2, 34 - height] {
                 let canvas = drawn(&full, Area { top, height });
                 for y in 0..34 {

@@ -89,6 +89,39 @@ impl Canvas {
     }
 }
 
+impl Canvas {
+    /// The frame as hexadecimal, for sending over the control socket.
+    ///
+    /// Two characters a pixel: 612 of them, which is small enough to send
+    /// twenty times a second without thinking about it, and readable enough
+    /// that a stuck panel can be diagnosed with `socat`.
+    #[must_use]
+    pub fn to_hex(&self) -> String {
+        use std::fmt::Write as _;
+        let mut out = String::with_capacity(PIXELS * 2);
+        for pixel in &self.pixels {
+            let _ = write!(out, "{pixel:02x}");
+        }
+        out
+    }
+
+    /// Reads a frame back, or `None` if it is not one.
+    #[must_use]
+    pub fn from_hex(text: &str) -> Option<Self> {
+        let text = text.trim();
+        if text.len() != PIXELS * 2 {
+            return None;
+        }
+
+        let mut canvas = Self::new();
+        for (index, pair) in text.as_bytes().chunks_exact(2).enumerate() {
+            let pair = std::str::from_utf8(pair).ok()?;
+            canvas.pixels[index] = u8::from_str_radix(pair, 16).ok()?;
+        }
+        Some(canvas)
+    }
+}
+
 /// Maps a coordinate to a pixel offset, or `None` when it falls off the canvas.
 fn index(x: i32, y: i32) -> Option<usize> {
     if x < 0 || y < 0 || x >= WIDTH || y >= HEIGHT {
@@ -198,6 +231,30 @@ mod tests {
     #[test]
     fn column_outside_the_canvas_is_dark() {
         assert_eq!(Canvas::new().column(WIDTH), [0u8; super::ROWS]);
+    }
+
+    #[test]
+    fn a_frame_survives_a_trip_over_the_socket() {
+        let mut canvas = Canvas::new();
+        canvas.set(0, 0, 0xAB);
+        canvas.set(8, 33, 0x01);
+        canvas.set(4, 17, 0xFF);
+
+        let text = canvas.to_hex();
+        assert_eq!(text.len(), super::PIXELS * 2);
+        assert_eq!(Canvas::from_hex(&text), Some(canvas));
+    }
+
+    #[test]
+    fn a_malformed_frame_is_refused_rather_than_half_read() {
+        assert_eq!(Canvas::from_hex(""), None);
+        assert_eq!(Canvas::from_hex("ab"), None, "too short");
+        assert_eq!(Canvas::from_hex(&"a".repeat(613)), None, "odd length");
+        assert_eq!(
+            Canvas::from_hex(&"zz".repeat(super::PIXELS)),
+            None,
+            "not hex"
+        );
     }
 
     #[test]

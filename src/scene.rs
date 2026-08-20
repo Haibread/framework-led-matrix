@@ -128,6 +128,43 @@ pub enum SceneKind {
 }
 
 impl SceneKind {
+    /// Every scene, in the order a catalogue should list them.
+    pub const ALL: [Self; 13] = [
+        Self::Pong,
+        Self::Snake,
+        Self::Tetris,
+        Self::Clock,
+        Self::Cpu,
+        Self::Ram,
+        Self::Net,
+        Self::Disk,
+        Self::Volume,
+        Self::Media,
+        Self::Spectrum,
+        Self::Mic,
+        Self::Battery,
+    ];
+
+    /// Rows this scene needs, without building it.
+    ///
+    /// Building one to ask would start its pollers and, for the spectrum, a
+    /// capture process — far too much for working out whether a stack fits.
+    #[must_use]
+    pub const fn min_height(self) -> i32 {
+        match self {
+            // A game played on a strip is not the same game.
+            Self::Pong | Self::Snake | Self::Tetris => canvas::HEIGHT,
+            Self::Clock => clock::MIN_HEIGHT,
+            Self::Cpu | Self::Ram => load::MIN_HEIGHT,
+            Self::Net | Self::Disk => traffic::MIN_HEIGHT,
+            Self::Volume => volume::MIN_HEIGHT,
+            Self::Media => media::MIN_HEIGHT,
+            Self::Spectrum | Self::Mic => spectrum::MIN_HEIGHT,
+            Self::Battery => battery::MIN_HEIGHT,
+            Self::Off => 1,
+        }
+    }
+
     /// The colour mode this scene is built for.
     ///
     /// Games pick motion over shading: greyscale costs ten commands a frame and
@@ -374,35 +411,52 @@ impl Stack {
     /// widget here reads better with room, and an even split is predictable
     /// enough to reason about when composing a stack.
     fn layout(&self) -> Vec<Area> {
-        let count = i32::try_from(self.scenes.len()).unwrap_or(1);
-        let dividers = count - 1;
-        let spare = canvas::HEIGHT - required_height(&self.scenes);
-        let (each, mut leftover) = if count > 0 {
-            (spare / count, spare % count)
-        } else {
-            (0, 0)
-        };
-
-        let mut areas = Vec::with_capacity(self.scenes.len());
-        let mut top = 0;
-        for scene in &self.scenes {
-            let mut height = scene.min_height() + each;
-            if leftover > 0 {
-                height += 1;
-                leftover -= 1;
-            }
-            areas.push(Area { top, height });
-            top += height + 1;
-        }
-        let _ = dividers;
-        areas
+        let minimums: Vec<i32> = self.scenes.iter().map(Scene::min_height).collect();
+        layout_for(&minimums)
     }
 }
 
 /// Rows a set of scenes needs, dividers included.
 fn required_height(scenes: &[AnyScene]) -> i32 {
-    let dividers = i32::try_from(scenes.len().saturating_sub(1)).unwrap_or(0);
-    scenes.iter().map(Scene::min_height).sum::<i32>() + dividers
+    let minimums: Vec<i32> = scenes.iter().map(Scene::min_height).collect();
+    needed_for(&minimums)
+}
+
+/// Rows a set of minimum heights needs, dividers included.
+#[must_use]
+pub fn needed_for(minimums: &[i32]) -> i32 {
+    let dividers = i32::try_from(minimums.len().saturating_sub(1)).unwrap_or(0);
+    minimums.iter().sum::<i32>() + dividers
+}
+
+/// Splits the panel between scenes of the given minimum heights.
+///
+/// The only place the sharing-out is written, so what a stack does and what a
+/// preview promises cannot disagree.
+#[must_use]
+pub fn layout_for(minimums: &[i32]) -> Vec<Area> {
+    let Ok(count) = i32::try_from(minimums.len()) else {
+        return Vec::new();
+    };
+    if count == 0 {
+        return Vec::new();
+    }
+
+    let spare = canvas::HEIGHT - needed_for(minimums);
+    let (each, mut leftover) = (spare / count, spare % count);
+
+    let mut areas = Vec::with_capacity(minimums.len());
+    let mut top = 0;
+    for minimum in minimums {
+        let mut height = minimum + each;
+        if leftover > 0 {
+            height += 1;
+            leftover -= 1;
+        }
+        areas.push(Area { top, height });
+        top += height + 1;
+    }
+    areas
 }
 
 impl Scene for Stack {

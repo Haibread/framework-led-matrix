@@ -1,8 +1,8 @@
 //! The fixed-rate render loop driving one panel.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -93,6 +93,7 @@ pub fn run_panel<M: Matrix, S: Scene>(
     open: impl Fn(ColorMode) -> Result<M>,
     mut scene: S,
     commands: &Receiver<Command<S>>,
+    mirror: &Arc<Mutex<Canvas>>,
     shutdown: &Arc<AtomicBool>,
 ) -> Result<()> {
     let PanelSettings {
@@ -165,6 +166,12 @@ pub fn run_panel<M: Matrix, S: Scene>(
         scene.update(delta);
         canvas.clear();
         scene.render(&mut canvas, Area::FULL);
+
+        // Publish before sending: a watcher should see what the panel is about
+        // to show, whether or not the write succeeds.
+        if let Ok(mut published) = mirror.lock() {
+            published.clone_from(&canvas);
+        }
 
         // The borrow has to end before the handle can be dropped below.
         let drawn = matrix.draw(&canvas);
@@ -282,10 +289,12 @@ fn wait(total: Duration, shutdown: &Arc<AtomicBool>) {
 #[cfg(test)]
 mod tests {
     use super::{Command, MAX_DROPPED_FRAMES, PanelSettings, run_panel};
+    use crate::canvas::Canvas;
     use crate::device::{ColorMode, MockMatrix};
     use crate::scene::MockScene;
     use anyhow::{Result, anyhow};
     use std::sync::Arc;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::mpsc::{Receiver, Sender, channel};
 
@@ -318,6 +327,12 @@ mod tests {
             stop.store(true, Ordering::Relaxed);
         });
         scene
+    }
+
+    /// Somewhere for a panel to publish what it drew; the tests that care
+    /// read it back, and the rest simply need one to exist.
+    fn mirror() -> Arc<Mutex<Canvas>> {
+        Arc::new(Mutex::new(Canvas::new()))
     }
 
     /// A scene that does nothing, cheaply.
@@ -367,6 +382,7 @@ mod tests {
             once(matrix),
             idle_scene(),
             &commands,
+            &mirror(),
             &shutdown,
         )
         .expect("clean shutdown");
@@ -396,6 +412,7 @@ mod tests {
             once(matrix),
             idle_scene(),
             &commands,
+            &mirror(),
             &shutdown,
         )
         .expect("clean shutdown");
@@ -412,6 +429,7 @@ mod tests {
             open,
             idle_scene(),
             &commands,
+            &mirror(),
             &shutdown,
         )
         .expect_err("an unopenable panel must be reported");
@@ -449,6 +467,7 @@ mod tests {
             open,
             idle_scene(),
             &commands,
+            &mirror(),
             &shutdown,
         )
         .expect("clean shutdown");
@@ -490,6 +509,7 @@ mod tests {
             open,
             idle_scene(),
             &commands,
+            &mirror(),
             &shutdown,
         )
         .expect("clean shutdown");
@@ -531,6 +551,7 @@ mod tests {
             open,
             idle_scene(),
             &commands,
+            &mirror(),
             &shutdown,
         )
         .expect("clean shutdown");
@@ -571,6 +592,7 @@ mod tests {
             once(matrix),
             idle_scene(),
             &commands,
+            &mirror(),
             &shutdown,
         )
         .expect("intermittent failures must not stop the panel");
@@ -608,6 +630,7 @@ mod tests {
             open,
             idle_scene(),
             &commands,
+            &mirror(),
             &shutdown,
         )
         .expect("clean shutdown");
@@ -649,6 +672,7 @@ mod tests {
             open,
             idle_scene(),
             &commands,
+            &mirror(),
             &shutdown,
         )
         .expect("clean shutdown");

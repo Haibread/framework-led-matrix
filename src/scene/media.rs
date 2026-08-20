@@ -23,7 +23,7 @@ use crate::scene::{Area, Scene};
 const POLL_INTERVAL: Duration = Duration::from_millis(700);
 
 /// Rows for a line of text and a progress rule under it.
-const MIN_HEIGHT: i32 = 7;
+pub const MIN_HEIGHT: i32 = 7;
 
 /// Pixels the title moves per second.
 const SCROLL_SPEED: f32 = 4.0;

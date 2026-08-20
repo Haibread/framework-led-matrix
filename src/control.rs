@@ -106,6 +106,8 @@ pub enum Request {
     Brightness(u8),
     /// Report what each panel is showing.
     Status,
+    /// Stream what each panel is drawing, until the caller goes away.
+    Watch,
 }
 
 impl fmt::Display for Request {
@@ -114,6 +116,7 @@ impl fmt::Display for Request {
             Self::Set { panel, scene } => write!(f, "set {panel} {scene}"),
             Self::Brightness(level) => write!(f, "brightness {level}"),
             Self::Status => f.write_str("status"),
+            Self::Watch => f.write_str("watch"),
         }
     }
 }
@@ -140,6 +143,7 @@ impl FromStr for Request {
                 Ok(Self::Brightness(level.parse()?))
             }
             Some("status") => Ok(Self::Status),
+            Some("watch") => Ok(Self::Watch),
             Some(other) => bail!("unknown command {other:?}"),
             None => bail!("empty request"),
         }
@@ -261,6 +265,7 @@ mod tests {
             Request::Brightness(0),
             Request::Brightness(255),
             Request::Status,
+            Request::Watch,
         ] {
             let line = request.to_string();
             let parsed: Request = line.parse().expect(&line);

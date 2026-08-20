@@ -15,7 +15,7 @@ use crate::system::{self, Counters};
 const SAMPLE_INTERVAL: f32 = 1.0;
 
 /// Rows for two three-deep histories either side of a rule.
-const MIN_HEIGHT: i32 = 7;
+pub const MIN_HEIGHT: i32 = 7;
 
 /// Samples kept, one per column.
 const HISTORY_LEN: usize = 9;

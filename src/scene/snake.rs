@@ -895,7 +895,10 @@ mod tests {
         while snake.phase == Phase::Playing {
             snake.step();
         }
-        assert!(matches!(snake.phase, Phase::Won(_)), "the run should be won");
+        assert!(
+            matches!(snake.phase, Phase::Won(_)),
+            "the run should be won"
+        );
 
         let body: Vec<Cell> = snake.body.iter().copied().collect();
         let mut previous = body.len();

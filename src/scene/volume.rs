@@ -18,7 +18,7 @@ use crate::scene::{Area, Scene};
 const POLL_INTERVAL: Duration = Duration::from_millis(400);
 
 /// Rows for the speaker and a bar beside it.
-const MIN_HEIGHT: i32 = 5;
+pub const MIN_HEIGHT: i32 = 5;
 /// Rows from which the bar becomes a column of its own.
 const TALL_HEIGHT: i32 = 12;
 

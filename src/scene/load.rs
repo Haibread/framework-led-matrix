@@ -20,7 +20,7 @@ use crate::system::{self, CpuSample};
 const SAMPLE_INTERVAL: f32 = 1.0;
 
 /// Rows for a bar and its rule: the least that still says something.
-const BAR_HEIGHT: i32 = 3;
+pub const MIN_HEIGHT: i32 = 3;
 /// Rows from which the figure itself is drawn.
 const NUMBER_HEIGHT: i32 = 6;
 /// Rows from which the history is drawn instead.
@@ -180,7 +180,7 @@ impl Scene for Load {
     }
 
     fn min_height(&self) -> i32 {
-        BAR_HEIGHT
+        MIN_HEIGHT
     }
 
     fn update(&mut self, delta: Duration) {
@@ -204,7 +204,7 @@ impl Scene for Load {
 
 #[cfg(test)]
 mod tests {
-    use super::{BAR_HEIGHT, HISTORY_HEIGHT, Load, NUMBER_HEIGHT, Source};
+    use super::{HISTORY_HEIGHT, Load, MIN_HEIGHT, NUMBER_HEIGHT, Source};
     use crate::canvas::Canvas;
     use crate::device::ColorMode;
     use crate::scene::{Area, Scene};
@@ -237,7 +237,7 @@ mod tests {
         // history. Each is distinguishable from the others by what it lights.
         let busy = load(Source::Cpu, 0.5);
 
-        let bar = drawn(&busy, BAR_HEIGHT);
+        let bar = drawn(&busy, MIN_HEIGHT);
         let number = drawn(&busy, NUMBER_HEIGHT);
         let history = drawn(&busy, HISTORY_HEIGHT);
 
@@ -252,7 +252,7 @@ mod tests {
     #[test]
     fn the_bar_tracks_the_value() {
         let width = |value| {
-            let canvas = drawn(&load(Source::Cpu, value), BAR_HEIGHT);
+            let canvas = drawn(&load(Source::Cpu, value), MIN_HEIGHT);
             (0..9).filter(|x| canvas.get(*x, 0) > 0).count()
         };
         assert_eq!(width(0.0), 0);
@@ -272,7 +272,7 @@ mod tests {
     #[test]
     fn nothing_is_drawn_outside_the_area() {
         let busy = load(Source::Memory, 1.0);
-        for height in BAR_HEIGHT..=34 {
+        for height in MIN_HEIGHT..=34 {
             for top in [0, (34 - height) / 2, 34 - height] {
                 let mut canvas = Canvas::new();
                 busy.render(&mut canvas, Area { top, height });

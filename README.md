@@ -157,6 +157,54 @@ Switching scenes can change the colour mode — a game wants `bw`, a widget want
 `greyscale` — and since the mode is fixed when the serial port is opened, the
 panel is reopened underneath when that happens.
 
+## Compose it in a terminal
+
+`ledmat set` is fine once you know what you want. Working out what you want is
+easier with the panels in front of you:
+
+```bash
+ledmat tui
+```
+
+Both panels are mirrored live, twenty frames a second, next to the catalogue of
+scenes. Build a stack, watch the row budget, apply it when it looks right.
+
+| Key | What it does |
+| --- | --- |
+| `Tab` | Switch which panel you are composing |
+| `↑` `↓` / `k` `j` | Move through the scenes |
+| `Space` | Add the selected scene to the draft stack |
+| `x` / `Backspace` | Drop the last scene from the draft |
+| `c` | Clear the draft back to what the panel is showing |
+| `Enter` | Apply the draft to the panel |
+| `+` `-` | Brightness, five at a time |
+| `q` / `Esc` / `Ctrl-C` | Leave |
+
+The pixels are drawn square, which a terminal cell is not: a cell counts as one
+unit across and two down, so a pixel spans as many cells across as it does
+half-lines down. That gives four sizes — a panel of 9x17, 18x34, 27x51 or
+36x68 — and the largest the window can hold is the one used. Below roughly 40
+by 20 the interface says it has no room rather than quietly clipping a panel.
+
+Everything else keeps its own size too, so a large screen gets margins around a
+centred block rather than a catalogue stretched across half a monitor.
+
+The bottom line carries the whole state: the draft, the rows it needs against
+the 34 there are, the brightness, and whatever the daemon last answered. A
+draft that does not fit says how many rows it is short before you apply it.
+
+The mirror is one more verb on the same socket. `watch` never returns; it
+writes a line per frame per panel, 612 hex characters, two per pixel:
+
+```bash
+echo watch | socat - UNIX-CONNECT:$XDG_RUNTIME_DIR/ledmat.sock
+```
+
+```
+frame left 000000...1f1f1f...
+frame right 000000...
+```
+
 ## It remembers
 
 Whatever `ledmat set` and `ledmat brightness` last applied is written down and
@@ -235,6 +283,7 @@ covers the rest, and the mocked `Matrix` trait covers the render loop.
 | `src/runner.rs` | The fixed-rate loop driving one panel |
 | `src/control.rs` | The socket protocol, shared by both ends |
 | `src/server.rs` | The daemon side of the socket |
+| `src/tui.rs` | The terminal composer, `ledmat tui` |
 
 ### Adding a scene
 

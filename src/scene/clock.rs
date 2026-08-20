@@ -14,7 +14,7 @@ use crate::font;
 use crate::scene::{Area, Scene};
 
 /// Rows needed for the small face: two rows of digits and a gap.
-const SMALL_HEIGHT: i32 = 11;
+pub const MIN_HEIGHT: i32 = 11;
 /// Rows from which the large face is used instead.
 const LARGE_HEIGHT: i32 = 15;
 /// Rows from which there is room for the seconds bar as well.
@@ -71,7 +71,7 @@ impl Scene for Clock {
     }
 
     fn min_height(&self) -> i32 {
-        SMALL_HEIGHT
+        MIN_HEIGHT
     }
 
     fn update(&mut self, _delta: Duration) {
@@ -111,7 +111,7 @@ impl Scene for Clock {
 
 #[cfg(test)]
 mod tests {
-    use super::{Clock, LARGE_HEIGHT, SECONDS_HEIGHT, SMALL_HEIGHT};
+    use super::{Clock, LARGE_HEIGHT, MIN_HEIGHT, SECONDS_HEIGHT};
     use crate::canvas::Canvas;
     use crate::device::ColorMode;
     use crate::scene::{Area, Scene};
@@ -144,7 +144,7 @@ mod tests {
             &clock,
             Area {
                 top: 0,
-                height: SMALL_HEIGHT,
+                height: MIN_HEIGHT,
             },
         );
         assert!(lit(&canvas) > 0, "nothing drawn in the height it asked for");
@@ -159,7 +159,7 @@ mod tests {
             &clock,
             Area {
                 top: 0,
-                height: SMALL_HEIGHT,
+                height: MIN_HEIGHT,
             },
         );
         let large = drawn(
@@ -183,7 +183,7 @@ mod tests {
         // The invariant the whole stack rests on: a widget that overflows would
         // silently scribble on its neighbour.
         let clock = at(23, 59, 59);
-        for height in SMALL_HEIGHT..=34 {
+        for height in MIN_HEIGHT..=34 {
             for top in 0..=(34 - height) {
                 let canvas = drawn(&clock, Area { top, height });
                 for y in 0..34 {

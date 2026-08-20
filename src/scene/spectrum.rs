@@ -11,7 +11,7 @@ use crate::device::ColorMode;
 use crate::scene::{Area, Scene};
 
 /// Rows for bars worth looking at.
-const MIN_HEIGHT: i32 = 8;
+pub const MIN_HEIGHT: i32 = 8;
 
 /// Brightness of the body of a bar, under its peak.
 const BODY_LEVEL: u8 = 110;
