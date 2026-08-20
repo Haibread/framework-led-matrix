@@ -166,8 +166,12 @@ pub fn scene_from_str(name: &str) -> Result<SceneKind> {
         "disk" => Ok(SceneKind::Disk),
         "volume" => Ok(SceneKind::Volume),
         "media" => Ok(SceneKind::Media),
-        "spectrum" => Ok(SceneKind::Spectrum),
-        "mic" => Ok(SceneKind::Mic),
+        // Both are spectrums; the prefix is which end of the sound card they
+        // listen to. Plain `spectrum` said neither and was read as the
+        // microphone by the person whose microphone was on. The short
+        // spellings still parse, so saved setups and fingers carry on working.
+        "speakers-spectrum" | "speakers" | "spectrum" => Ok(SceneKind::Spectrum),
+        "mic-spectrum" | "mic" => Ok(SceneKind::Mic),
         "battery" => Ok(SceneKind::Battery),
         "off" => Ok(SceneKind::Off),
         other => {
@@ -229,6 +233,30 @@ impl FromStr for Response {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn every_spelling_a_scene_ever_had_still_parses() {
+        // Renaming a scene must not turn a saved setup into a parse error on
+        // the next reboot, nor a habit into an error message.
+        use super::{SceneKind, SceneSpec};
+        for spelling in ["spectrum", "speakers", "speakers-spectrum"] {
+            assert_eq!(
+                spelling.parse::<SceneSpec>().expect(spelling),
+                SceneSpec::single(SceneKind::Spectrum),
+                "{spelling} stopped parsing"
+            );
+        }
+        for spelling in ["mic", "mic-spectrum"] {
+            assert_eq!(
+                spelling.parse::<SceneSpec>().expect(spelling),
+                SceneSpec::single(SceneKind::Mic),
+                "{spelling} stopped parsing"
+            );
+        }
+        // What gets written down and shown is the long form.
+        assert_eq!(SceneKind::Spectrum.to_string(), "speakers-spectrum");
+        assert_eq!(SceneKind::Mic.to_string(), "mic-spectrum");
+    }
+
     use super::{PanelName, Request, Response, SceneSpec};
     use crate::scene::SceneKind;
 

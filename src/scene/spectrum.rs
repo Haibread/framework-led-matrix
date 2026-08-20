@@ -15,6 +15,8 @@ pub const MIN_HEIGHT: i32 = 8;
 
 /// Brightness of the body of a bar, under its peak.
 const BODY_LEVEL: u8 = 110;
+/// The always-lit floor the bars stand on.
+const FLOOR_LEVEL: u8 = 60;
 /// How far a peak marker falls per second, as a share of the panel.
 const PEAK_FALL: f32 = 0.55;
 
@@ -43,8 +45,8 @@ impl Spectrum {
 impl Scene for Spectrum {
     fn name(&self) -> &'static str {
         match self.source {
-            Source::Output => "spectrum",
-            Source::Input => "mic",
+            Source::Output => "speakers-spectrum",
+            Source::Input => "mic-spectrum",
         }
     }
 
@@ -74,6 +76,12 @@ impl Scene for Spectrum {
         for (index, level) in bands.iter().enumerate() {
             let column = i32::try_from(index).unwrap_or(0);
             let filled = canvas::to_pixel(level.clamp(0.0, 1.0) * rows);
+
+            // The bars stand on a floor that is always lit. In silence every
+            // band is zero and the panel went completely dark, which looks
+            // exactly like a scene that is broken rather than one with nothing
+            // to say — and silence is the normal state of a speaker.
+            canvas.set_max(column, area.bottom(), FLOOR_LEVEL);
 
             for step in 0..filled {
                 let level = if self.mode == ColorMode::Bw || step + 1 == filled {
@@ -163,16 +171,37 @@ mod tests {
     }
 
     #[test]
+    fn silence_still_looks_like_an_instrument() {
+        // Nothing playing is the normal state of a speaker. Drawing nothing at
+        // all made it indistinguishable from a scene that had failed.
+        let spectrum = showing([0.0; BANDS]);
+        let mut canvas = Canvas::new();
+        let area = Area { top: 4, height: 20 };
+        spectrum.render(&mut canvas, area);
+
+        for x in 0..9 {
+            assert!(canvas.get(x, area.bottom()) > 0, "column {x} went dark");
+        }
+        // A floor, and nothing more: silence must not read as sound.
+        let lit = (0..34)
+            .flat_map(|y| (0..9).map(move |x| (x, y)))
+            .filter(|(x, y)| canvas.get(*x, *y) > 0)
+            .count();
+        assert_eq!(lit, 9, "silence lit more than the floor");
+    }
+
+    #[test]
     fn the_two_sources_are_named_apart() {
         // They are the same widget pointed at different devices, and the name
-        // is what says which — a spectrum of silence looks like a broken one.
+        // is the only thing that says which. "spectrum" said neither, and got
+        // read as the microphone by the person whose microphone was on.
         assert_eq!(
             Spectrum::new(super::Source::Output, ColorMode::Bw).name(),
-            "spectrum"
+            "speakers-spectrum"
         );
         assert_eq!(
             Spectrum::new(super::Source::Input, ColorMode::Bw).name(),
-            "mic"
+            "mic-spectrum"
         );
     }
 

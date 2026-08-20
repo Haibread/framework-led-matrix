@@ -203,8 +203,8 @@ impl fmt::Display for SceneKind {
             Self::Disk => "disk",
             Self::Volume => "volume",
             Self::Media => "media",
-            Self::Spectrum => "spectrum",
-            Self::Mic => "mic",
+            Self::Spectrum => "speakers-spectrum",
+            Self::Mic => "mic-spectrum",
             Self::Battery => "battery",
             Self::Off => "off",
         };
