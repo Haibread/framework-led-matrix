@@ -37,10 +37,12 @@ const STARVATION_LIMIT: u32 = 900;
 /// Not an arbitrary difficulty knob — it is what keeps the picture readable. The
 /// head is just a lit pixel among others, so the only way to follow it is
 /// continuity, and that breaks down as soon as the head runs alongside the body.
-/// Measured over long runs, how often that happens climbs with length: 2-3% of
-/// moves below twenty cells, 17% at thirty, 43% past eighty. Past that point the
-/// snake reads as a tangle passing through itself, however correct it is.
-const MAX_LENGTH: usize = 20;
+/// Measured over 1.6M moves, how often that happens climbs with length: 1% below
+/// ten cells, 5% in the teens, 10% in the twenties, 16% in the thirties. Past
+/// that the snake reads as a tangle passing through itself, however correct it
+/// is. Forty is the point where a run still resolves in about a minute and a
+/// half and the tangle is not yet the dominant impression.
+const MAX_LENGTH: usize = 40;
 
 const HEAD_LEVEL: u8 = 255;
 
@@ -58,8 +60,15 @@ const FOOD_DUTY: f32 = 0.75;
 /// Toggles per second of the death flash. Slow enough to read as an event
 /// rather than as a fault.
 const DEATH_FLASH_HZ: f32 = 5.0;
-/// Toggles per second when the run is won: calmer, so the two read differently.
-const WIN_FLASH_HZ: f32 = 2.0;
+/// How long the win animation lasts before a new game starts.
+///
+/// A win used to flash the body like a death did, only slower — 2 Hz against
+/// 5 Hz. On a one-bit panel that is not a difference anyone can see, so finishing
+/// a run read as dying, which was reported as the snake killing itself once it
+/// got long. The win now retracts the body into the head instead: every segment
+/// left is steadily lit, nothing ever blinks, and the two endings can no longer
+/// be confused.
+const WIN_RETRACT: f32 = 1.4;
 const BODY_BRIGHTEST: u32 = 190;
 const BODY_DIMMEST: u32 = 45;
 
@@ -113,7 +122,7 @@ enum Phase {
     Playing,
     /// The snake died; flashing before the next game.
     Dying(f32),
-    /// The snake reached [`MAX_LENGTH`]; celebrating before the next game.
+    /// The snake reached [`MAX_LENGTH`]; retracting before the next game.
     Won(f32),
 }
 
@@ -194,7 +203,7 @@ impl Snake {
 
         if free.is_empty() {
             // The board is full: a perfect game. Celebrate, then start over.
-            self.phase = Phase::Won(DEATH_FLASH);
+            self.phase = Phase::Won(WIN_RETRACT);
             return;
         }
 
@@ -247,7 +256,7 @@ impl Snake {
         if eats {
             self.hunger = 0;
             if self.body.len() >= MAX_LENGTH {
-                self.phase = Phase::Won(DEATH_FLASH);
+                self.phase = Phase::Won(WIN_RETRACT);
                 return;
             }
             self.place_food();
@@ -393,6 +402,23 @@ impl Snake {
             .max_by_key(|direction| self.open_space(head.shifted(*direction)))
     }
 
+    /// Draws the `shown` segments closest to the head, at playing brightness.
+    ///
+    /// The gradient is always keyed on the full length, so a body being
+    /// retracted keeps the brightness it had while playing instead of
+    /// rescaling itself a little brighter on every frame.
+    fn render_body(&self, canvas: &mut Canvas, shown: usize) {
+        let length = self.body.len();
+        for (index, cell) in self.body.iter().take(shown).enumerate() {
+            let level = if index == 0 {
+                HEAD_LEVEL
+            } else {
+                body_level(index, length)
+            };
+            canvas.set_max(cell.x, cell.y, level);
+        }
+    }
+
     /// Number of squares reachable from `from`, ignoring the tail's movement.
     fn open_space(&self, from: Cell) -> usize {
         let mut seen = [false; PIXELS];
@@ -470,20 +496,25 @@ impl Scene for Snake {
     }
 
     fn render(&self, canvas: &mut Canvas, _area: Area) {
-        let ending = match self.phase {
-            Phase::Dying(remaining) => Some((remaining, DEATH_FLASH_HZ)),
-            Phase::Won(remaining) => Some((remaining, WIN_FLASH_HZ)),
-            Phase::Playing => None,
-        };
-        if let Some((remaining, rate)) = ending {
-            // Deliberate blinking, unlike anything during play: this one is
-            // announcing that the run ended.
-            let lit = canvas::floor_pixel(remaining * rate) % 2 == 0;
-            let level = if lit { 210 } else { 30 };
-            for cell in &self.body {
-                canvas.set_max(cell.x, cell.y, level);
+        match self.phase {
+            Phase::Dying(remaining) => {
+                // Deliberate blinking, unlike anything else this scene draws:
+                // this one is announcing that the run ended badly.
+                let lit = canvas::floor_pixel(remaining * DEATH_FLASH_HZ) % 2 == 0;
+                let level = if lit { 210 } else { 30 };
+                for cell in &self.body {
+                    canvas.set_max(cell.x, cell.y, level);
+                }
+                return;
             }
-            return;
+            Phase::Won(remaining) => {
+                // The body swallows itself tail first, holding its playing
+                // brightness the whole way so nothing ever blinks. See
+                // [`WIN_RETRACT`] for why a win must not look like a death.
+                self.render_body(canvas, retracted_length(self.body.len(), remaining));
+                return;
+            }
+            Phase::Playing => {}
         }
 
         // The food has to read differently from the body. Greyscale can pulse
@@ -501,16 +532,22 @@ impl Scene for Snake {
         // Every segment stays lit, in both modes. Greyscale marks the head by
         // brightness; black and white does not mark it at all, on purpose. See
         // [`FOOD_BLINK_HZ`] for why nothing on the snake may blink.
-        let length = self.body.len();
-        for (index, cell) in self.body.iter().enumerate() {
-            let level = if index == 0 {
-                HEAD_LEVEL
-            } else {
-                body_level(index, length)
-            };
-            canvas.set_max(cell.x, cell.y, level);
-        }
+        self.render_body(canvas, self.body.len());
     }
+}
+
+/// How many segments are still lit `remaining` seconds into the win animation.
+///
+/// Counts down to zero over [`WIN_RETRACT`] whatever the length, so the ending
+/// takes the same time on a snake that filled the board as on one that only
+/// just reached [`MAX_LENGTH`].
+fn retracted_length(length: usize, remaining: f32) -> usize {
+    // Turned into a per-mille integer first, so the count is exact arithmetic
+    // on the length rather than a float scaled by it.
+    let fraction = (remaining / WIN_RETRACT).clamp(0.0, 1.0);
+    let permille = u32::try_from(canvas::to_pixel(fraction * 1000.0)).unwrap_or(0);
+    let total = u32::try_from(length).unwrap_or(u32::MAX);
+    usize::try_from(total * permille / 1000).unwrap_or(0)
 }
 
 /// Whether something blinking at `hz` is lit, `duty` being the lit share of
@@ -601,7 +638,10 @@ fn body_level(index: usize, length: usize) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cell, Direction, PIXELS, Phase, Snake, body_level, search, slot};
+    use super::{
+        Cell, Direction, PIXELS, Phase, Snake, WIN_RETRACT, body_level, retracted_length, search,
+        slot,
+    };
     use crate::canvas::{self, Canvas};
     use crate::device::{BW_THRESHOLD, ColorMode};
     use crate::scene::{Area, Scene};
@@ -710,7 +750,9 @@ mod tests {
             let mut snake = Snake::new(Some(seed), ColorMode::Bw);
             let mut wins = 0;
 
-            for step in 0..1_200 {
+            // A run to MAX_LENGTH takes around 580 moves, so this is a handful
+            // of complete rounds rather than the couple it used to be.
+            for step in 0..6_000 {
                 match snake.phase {
                     Phase::Playing => snake.step(),
                     Phase::Won(_) => {
@@ -723,7 +765,7 @@ mod tests {
                 }
             }
 
-            assert!(wins >= 2, "seed {seed} only completed {wins} runs");
+            assert!(wins >= 5, "seed {seed} only completed {wins} runs");
         }
     }
 
@@ -779,9 +821,11 @@ mod tests {
         // Reported twice as "the snake passes through its body". It never does:
         // on a one-bit panel a head touching a non-consecutive segment merges
         // into it, so the head disappears into the blob and reappears further
-        // on, which looks exactly like walking through. The AI used to do this
-        // on 17% of moves; ranking safe moves by how much they hug brought it
-        // to 10%, and the rest is corridors where there is no alternative.
+        // on, which looks exactly like walking through. Ranking safe moves by
+        // how much they hug is what keeps this down; the rest is corridors
+        // where there is no alternative. It climbs with length — 1% below ten
+        // cells, 16% in the thirties — so the bar has to leave room for the
+        // long end of a run to MAX_LENGTH. This seed sits at 7%.
         let mut snake = Snake::new(Some(11), ColorMode::Bw);
         let mut steps = 0;
         let mut hugging = 0;
@@ -839,6 +883,92 @@ mod tests {
         }
         assert_eq!(snake.phase, Phase::Playing);
         assert_eq!(snake.body.len(), 3, "the board did not reset");
+    }
+
+    #[test]
+    fn a_won_run_retracts_into_its_head_without_ever_blinking() {
+        // Reported as "the snake kills itself once it gets big". It does not —
+        // it reaches MAX_LENGTH and wins. The win used to flash the body at
+        // 2 Hz where a death flashes at 5 Hz, a distinction nobody can make on
+        // a one-bit panel, so every finished run read as a death.
+        let mut snake = Snake::new(Some(7), ColorMode::Bw);
+        while snake.phase == Phase::Playing {
+            snake.step();
+        }
+        assert!(matches!(snake.phase, Phase::Won(_)), "the run should be won");
+
+        let body: Vec<Cell> = snake.body.iter().copied().collect();
+        let mut previous = body.len();
+        let mut frames = 0;
+
+        while matches!(snake.phase, Phase::Won(_)) {
+            let mut canvas = Canvas::new();
+            snake.render(&mut canvas, Area::FULL);
+
+            let lit = body
+                .iter()
+                .filter(|cell| canvas.get(cell.x, cell.y) >= BW_THRESHOLD)
+                .count();
+            // Whatever is left has to be the head end of the snake: the tail
+            // retracts into the head, it does not dissolve into holes.
+            for (index, cell) in body.iter().enumerate() {
+                assert_eq!(
+                    canvas.get(cell.x, cell.y) >= BW_THRESHOLD,
+                    index < lit,
+                    "segment {index} out of order on frame {frames}"
+                );
+            }
+            assert!(
+                lit <= previous,
+                "the body came back on frame {frames}: {previous} then {lit}"
+            );
+
+            previous = lit;
+            frames += 1;
+            snake.update(Duration::from_millis(33));
+        }
+
+        assert!(frames > 30, "only {frames} frames of win animation");
+        assert!(previous <= 1, "{previous} segments still lit at the end");
+        assert_eq!(snake.phase, Phase::Playing, "the next game did not start");
+        assert_eq!(snake.body.len(), 3, "the board did not reset");
+    }
+
+    #[test]
+    fn a_death_still_blinks_where_a_win_does_not() {
+        // The other half of the pair above: the two endings have to look like
+        // different things, so this one must keep toggling.
+        let mut snake = Snake::new(Some(1), ColorMode::Bw);
+        snake.die();
+        let head = snake.head();
+        let (mut lit, mut dark) = (0, 0);
+
+        while matches!(snake.phase, Phase::Dying(_)) {
+            let mut canvas = Canvas::new();
+            snake.render(&mut canvas, Area::FULL);
+            if canvas.get(head.x, head.y) >= BW_THRESHOLD {
+                lit += 1;
+            } else {
+                dark += 1;
+            }
+            snake.update(Duration::from_millis(33));
+        }
+
+        assert!(lit > 3, "the death flash never lit up");
+        assert!(dark > 3, "the death flash never went dark");
+    }
+
+    #[test]
+    fn the_retract_runs_from_the_whole_body_down_to_nothing() {
+        assert_eq!(retracted_length(40, WIN_RETRACT), 40);
+        assert_eq!(retracted_length(40, WIN_RETRACT / 2.0), 20);
+        assert_eq!(retracted_length(40, 0.0), 0);
+        assert_eq!(retracted_length(40, -1.0), 0, "clamped past the end");
+        assert_eq!(
+            retracted_length(40, WIN_RETRACT * 2.0),
+            40,
+            "clamped before the start"
+        );
     }
 
     #[test]

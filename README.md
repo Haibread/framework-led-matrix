@@ -25,7 +25,9 @@ Eight scenes ship today. Three games, playing on their own:
   forever.
 - **snake** — plans a path to the food, simulates walking it, and only commits
   if it can still reach its own tail afterwards. When nothing is safe it chases
-  its tail until the board opens up.
+  its tail until the board opens up. A run ends at forty cells, past which the
+  snake reads as a tangle rather than a line; the body then retracts into the
+  head and a new game starts. Dying, which is rare, flashes instead.
 - **tetris** — tries every rotation in every column, drops the piece and scores
   the well it would leave behind. Buried holes weigh heaviest, because they are
   what actually ends a game; a bot that only chased line clears would top out in
