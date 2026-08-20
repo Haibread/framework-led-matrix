@@ -44,10 +44,20 @@ given and shows more detail with more rows:
 | `net` | 7 rows | out above the rule, in below; deeper histories with room |
 | `disk` | 7 rows | the same grammar as `net`: two widgets, one thing to learn |
 | `battery` | 5 rows | stands upright from 20 rows instead of lying down |
+| `volume` | 5 rows | the speaker cone grows with the band, over a full-width bar |
+| `speakers-spectrum` | 8 rows | nine bands of what is coming **out** of the sound card |
+| `mic-spectrum` | 8 rows | the same nine bands, listening to the microphone instead |
 | `off` | — | nothing; blanks a panel without stopping its thread |
 
 `cpu,ram` composes exactly what a combined gauge would draw, so there is no
 separate widget for it — the stack does the composing.
+
+`speakers-spectrum` and `mic-spectrum` are the same widget pointed at opposite
+ends of the sound card: one draws what is being played, the other what is being
+heard. The output one was called `spectrum`, which said neither; that spelling
+and the short `speakers` / `mic` both still parse.
+Silence draws a lit floor rather than nothing, so a quiet machine does not look
+like a broken widget.
 
 Network and disk are on a logarithmic scale: traffic spans six orders of
 magnitude between a keepalive and a download, and a linear scale would leave
@@ -58,7 +68,7 @@ everything but the peak a single row tall.
 - Rust 1.97.1 (pinned in `rust-toolchain.toml`)
 - A Framework 16 with at least one LED Matrix module
 - `pre-commit` and `actionlint` for the git hooks
-- `wpctl` and `parec` at runtime, for the `volume` and `spectrum` widgets
+- `wpctl` and `parec` at runtime, for the `volume` and spectrum widgets
 
 No system libraries are needed to build: the serial dependency's `libudev`
 feature is off, since the modules are opened by path and never enumerated.
@@ -169,16 +179,21 @@ ledmat tui
 Both panels are mirrored live, twenty frames a second, next to the catalogue of
 scenes. Build a stack, watch the row budget, apply it when it looks right.
 
+Picking one scene is a move and `Enter`. `Space` is only for stacking several,
+and refuses a scene there is no room for at the keystroke rather than at
+`Enter` — a game fills all 34 rows on its own, so nothing stacks onto one.
+
 | Key | What it does |
 | --- | --- |
 | `Tab` | Switch which panel you are composing |
 | `↑` `↓` / `k` `j` | Move through the scenes |
-| `Space` | Add the selected scene to the draft stack |
+| `Enter` | Show the selected scene — or the draft stack, if you started one |
+| `Space` | Add the selected scene to a draft stack |
 | `x` / `Backspace` | Drop the last scene from the draft |
-| `c` | Clear the draft back to what the panel is showing |
-| `Enter` | Apply the draft to the panel |
+| `c` / `Esc` | Drop the draft |
 | `+` `-` | Brightness, five at a time |
-| `q` / `Esc` / `Ctrl-C` | Leave |
+| `?` | The same list, over the interface |
+| `q` / `Ctrl-C` | Leave |
 
 The pixels are drawn square, which a terminal cell is not: a cell counts as one
 unit across and two down, so a pixel spans as many cells across as it does
@@ -190,8 +205,10 @@ Everything else keeps its own size too, so a large screen gets margins around a
 centred block rather than a catalogue stretched across half a monitor.
 
 The bottom line carries the whole state: the draft, the rows it needs against
-the 34 there are, the brightness, and whatever the daemon last answered. A
-draft that does not fit says how many rows it is short before you apply it.
+the 34 there are, the brightness, whatever the daemon last answered, and the
+keys. A draft that does not fit says how many rows it is short before you apply
+it. A message from the daemon joins that line instead of replacing it, and the
+next keystroke puts it away.
 
 The mirror is one more verb on the same socket. `watch` never returns; it
 writes a line per frame per panel, 612 hex characters, two per pixel:

@@ -21,7 +21,7 @@ use ratatui::crossterm::terminal::{
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::{Terminal, prelude::CrosstermBackend};
 
 use crate::canvas::{self, Canvas};
@@ -39,9 +39,32 @@ const TICK: Duration = Duration::from_millis(50);
 const PIXELS_ACROSS: u16 = 9;
 const PIXELS_DOWN: u16 = 34;
 
-/// Columns the catalogue cannot do without, and what it likes to have.
+/// Columns the catalogue cannot do without: a cursor, a truncated name and the
+/// row count. Below this the panels get the room instead.
 const CATALOGUE_MIN_WIDTH: u16 = 18;
-const CATALOGUE_WIDTH: u16 = 26;
+
+/// Columns the longest scene name needs, cursor and row count included.
+///
+/// Measured rather than written down: the names have already grown once, and a
+/// hand-picked number would have quietly clipped `speakers-spectrum`.
+fn catalogue_ideal_width() -> u16 {
+    let longest = SceneKind::ALL
+        .iter()
+        .map(|kind| kind.to_string().chars().count())
+        .max()
+        .unwrap_or(0);
+    // "> " + name + " " + two digits, inside a border.
+    u16::try_from(longest + 9).unwrap_or(CATALOGUE_MIN_WIDTH)
+}
+
+/// The width a scene name is padded to in the catalogue.
+fn name_column() -> usize {
+    SceneKind::ALL
+        .iter()
+        .map(|kind| kind.to_string().chars().count())
+        .max()
+        .unwrap_or(0)
+}
 
 /// How big a pixel is drawn.
 ///
@@ -104,7 +127,11 @@ struct App {
     socket: PathBuf,
     /// The last frame each panel sent.
     frames: [Canvas; 2],
-    /// The stack being composed for each panel, not yet applied.
+    /// What each panel is showing, as the daemon last reported it.
+    showing: [Vec<SceneKind>; 2],
+    /// The stack being composed for each panel. Empty until something is
+    /// picked: starting it off as a copy of what was showing meant the first
+    /// `space` appended to a full panel and could not be applied.
     drafts: [Vec<SceneKind>; 2],
     /// Which panel the keys act on.
     focus: usize,
@@ -112,6 +139,8 @@ struct App {
     selected: usize,
     brightness: u8,
     status: String,
+    /// Whether the key list is over everything else.
+    helping: bool,
 }
 
 impl App {
@@ -120,11 +149,13 @@ impl App {
         let mut app = Self {
             socket,
             frames: [Canvas::new(), Canvas::new()],
+            showing: [Vec::new(), Vec::new()],
             drafts: [Vec::new(), Vec::new()],
             focus: 0,
             selected: 0,
             brightness: 30,
             status: String::new(),
+            helping: false,
         };
         app.read_status();
         app
@@ -151,29 +182,67 @@ impl App {
                 continue;
             };
             if let Ok(parsed) = spec.parse::<SceneSpec>() {
-                self.drafts[index] = parsed.scenes().to_vec();
+                self.showing[index] = parsed.scenes().to_vec();
             }
         }
     }
 
-    /// Rows the current draft needs, and what is left over.
+    /// What `enter` would put on the panel: the draft, or failing that the one
+    /// scene under the cursor.
+    fn effective(&self) -> Vec<SceneKind> {
+        if self.drafts[self.focus].is_empty() {
+            SceneKind::ALL
+                .get(self.selected)
+                .copied()
+                .into_iter()
+                .collect()
+        } else {
+            self.drafts[self.focus].clone()
+        }
+    }
+
+    /// Rows that would take, and what is left over.
     fn budget(&self) -> (i32, i32) {
-        let minimums: Vec<i32> = self.drafts[self.focus]
-            .iter()
-            .map(|kind| kind.min_height())
-            .collect();
-        let needed = scene::needed_for(&minimums);
+        let needed = rows_for(&self.effective());
         (needed, canvas::HEIGHT - needed)
     }
 
-    /// Sends the focused draft to the daemon.
-    fn apply(&mut self) {
-        let panel = self.panel();
-        let draft = &self.drafts[self.focus];
-        if draft.is_empty() {
-            "nothing to apply".clone_into(&mut self.status);
+    /// Adds a scene to the draft, or explains why it cannot go there.
+    ///
+    /// Refusing here says so at the keystroke that did it, rather than leaving
+    /// an unapplicable stack to be discovered at `enter`.
+    fn add(&mut self, kind: SceneKind) {
+        let focus = self.focus;
+        let mut proposed = self.drafts[focus].clone();
+        proposed.push(kind);
+
+        let needed = rows_for(&proposed);
+        if needed > canvas::HEIGHT {
+            self.status = format!(
+                "no room for {kind}: that stack needs {needed} rows of {} — c starts over",
+                canvas::HEIGHT
+            );
             return;
         }
+        self.drafts[focus] = proposed;
+    }
+
+    /// Sends the focused draft to the daemon.
+    ///
+    /// With nothing composed, this shows the scene under the cursor on its own:
+    /// picking one scene is what this is used for nine times in ten, and it
+    /// should not cost three keystrokes.
+    fn apply(&mut self) {
+        let panel = self.panel();
+        let focus = self.focus;
+        if self.drafts[focus].is_empty() {
+            let Some(kind) = SceneKind::ALL.get(self.selected) else {
+                "nothing to apply".clone_into(&mut self.status);
+                return;
+            };
+            self.drafts[focus].push(*kind);
+        }
+        let draft = &self.drafts[focus];
 
         let spec: SceneSpec = match draft
             .iter()
@@ -190,7 +259,11 @@ impl App {
         };
 
         self.status = match ask(&self.socket, &Request::Set { panel, scene: spec }) {
-            Ok(response) => response.message().to_owned(),
+            Ok(response) => {
+                // Applied, so the draft has become what is showing.
+                self.showing[focus] = std::mem::take(&mut self.drafts[focus]);
+                response.message().to_owned()
+            }
             Err(error) => error.to_string(),
         };
     }
@@ -262,6 +335,15 @@ pub fn run(socket: PathBuf) -> Result<()> {
     let frames = watch(&socket)?;
     let mut app = App::new(socket);
 
+    // A panic between here and the restore at the end would otherwise leave the
+    // shell in raw mode inside the alternate screen, with the message painted
+    // somewhere invisible. Put the terminal back first, then let it through.
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        restore();
+        previous(info);
+    }));
+
     enable_raw_mode().context("taking over the terminal")?;
     let mut out = std::io::stdout();
     execute!(out, EnterAlternateScreen).context("switching screens")?;
@@ -302,10 +384,23 @@ pub fn run(socket: PathBuf) -> Result<()> {
     };
 
     // Put the terminal back whatever happened, then report.
-    disable_raw_mode().ok();
-    execute!(terminal.backend_mut(), LeaveAlternateScreen).ok();
+    restore();
     terminal.show_cursor().ok();
     outcome
+}
+
+/// Hands the terminal back: ordinary mode, ordinary screen, visible cursor.
+///
+/// Called on the way out and again from the panic hook, so it has to be happy
+/// running twice and to ignore anything that goes wrong.
+fn restore() {
+    disable_raw_mode().ok();
+    execute!(
+        std::io::stdout(),
+        LeaveAlternateScreen,
+        ratatui::crossterm::cursor::Show
+    )
+    .ok();
 }
 
 /// Acts on a key, returning true when it is time to leave.
@@ -317,8 +412,17 @@ fn handle(app: &mut App, key: KeyEvent) -> bool {
         return true;
     }
 
+    // Any key dismisses the last message, so the reminders are never more than
+    // one keystroke away, and closes the help.
+    app.status.clear();
+    if app.helping {
+        app.helping = false;
+        return false;
+    }
+
     match key.code {
-        KeyCode::Char('q') | KeyCode::Esc => return true,
+        KeyCode::Char('?') => app.helping = true,
+        KeyCode::Char('q') => return true,
         KeyCode::Tab => app.focus = 1 - app.focus,
         KeyCode::Up | KeyCode::Char('k') => {
             app.selected = app.selected.saturating_sub(1);
@@ -328,20 +432,18 @@ fn handle(app: &mut App, key: KeyEvent) -> bool {
         }
         KeyCode::Char(' ') => {
             if let Some(kind) = SceneKind::ALL.get(app.selected) {
-                let focus = app.focus;
-                app.drafts[focus].push(*kind);
-                app.status.clear();
+                app.add(*kind);
             }
         }
         KeyCode::Char('x') | KeyCode::Backspace => {
             let focus = app.focus;
             app.drafts[focus].pop();
-            app.status.clear();
         }
-        KeyCode::Char('c') => {
+        // Esc backs out of what is being composed. It used to leave the whole
+        // interface, which is a poor answer to a key people press to cancel.
+        KeyCode::Char('c') | KeyCode::Esc => {
             let focus = app.focus;
             app.drafts[focus].clear();
-            app.status.clear();
         }
         KeyCode::Enter => app.apply(),
         KeyCode::Char('+') => {
@@ -380,7 +482,14 @@ fn draw(area: Rect, frame: &mut ratatui::Frame, app: &App) {
     let titles: Vec<String> = PanelName::ALL
         .into_iter()
         .enumerate()
-        .map(|(index, panel)| format!(" {panel} · {} ", spec_of(&app.drafts[index])))
+        .map(|(index, panel)| {
+            let showing = spec_of(&app.showing[index]);
+            if app.drafts[index].is_empty() {
+                format!(" {panel} · {showing} ")
+            } else {
+                format!(" {panel} · {showing} → {} ", spec_of(&app.drafts[index]))
+            }
+        })
         .collect();
 
     let widest = titles
@@ -429,14 +538,21 @@ fn draw(area: Rect, frame: &mut ratatui::Frame, app: &App) {
 
     frame.render_widget(catalogue(app), columns[2]);
     frame.render_widget(Paragraph::new(status_line(app)), state);
+
+    if app.helping {
+        let panel = help_area(boxes);
+        frame.render_widget(Clear, panel);
+        frame.render_widget(help(), panel);
+    }
 }
 
 /// The columns the catalogue takes: its comfortable width when the terminal can
 /// afford it, its bare minimum otherwise.
 fn catalogue_width(available: u16, scale: Scale) -> u16 {
     let (box_width, _) = scale.box_size();
-    if available >= box_width * 2 + CATALOGUE_WIDTH {
-        CATALOGUE_WIDTH
+    let ideal = catalogue_ideal_width();
+    if available >= box_width * 2 + ideal {
+        ideal
     } else {
         CATALOGUE_MIN_WIDTH
     }
@@ -463,6 +579,27 @@ fn centred(area: Rect, scale: Scale, widest_title: u16) -> Rect {
     Rect::new(
         area.x + (area.width - width) / 2,
         area.y + (area.height - height) / 2,
+        width,
+        height,
+    )
+}
+
+/// Where the key list goes: over the middle of the interface, big enough for
+/// every line and no bigger.
+fn help_area(over: Rect) -> Rect {
+    let rows = u16::try_from(KEYS.len()).unwrap_or(u16::MAX);
+    let height = rows.saturating_add(2).min(over.height);
+    // Measured from the text rather than guessed at: a help with its own last
+    // words cut off would be a poor sort of help.
+    let longest = KEYS
+        .iter()
+        .map(|(key, what)| key.chars().count().max(KEY_COLUMN) + what.chars().count() + 6)
+        .max()
+        .unwrap_or(0);
+    let width = u16::try_from(longest).unwrap_or(u16::MAX).min(over.width);
+    Rect::new(
+        over.x + (over.width - width) / 2,
+        over.y + (over.height - height) / 2,
         width,
         height,
     )
@@ -536,7 +673,12 @@ fn catalogue(app: &App) -> Paragraph<'static> {
         .enumerate()
         .map(|(index, kind)| {
             let cursor = if index == app.selected { "▸" } else { " " };
-            let text = format!("{cursor} {:<10} {:>2}", kind.to_string(), kind.min_height());
+            let text = format!(
+                "{cursor} {:<width$} {:>2}",
+                kind.to_string(),
+                kind.min_height(),
+                width = name_column()
+            );
             let style = if index == app.selected {
                 Style::default().add_modifier(Modifier::BOLD)
             } else {
@@ -555,14 +697,11 @@ fn catalogue(app: &App) -> Paragraph<'static> {
 }
 
 /// The one line at the bottom: what is being composed, and whether it fits.
+///
+/// A message from the daemon joins the line rather than replacing it. It used
+/// to take the whole row, reminders included, and nothing ever put them back —
+/// so one keystroke left you in front of an interface with no visible way in.
 fn status_line(app: &App) -> Line<'static> {
-    if !app.status.is_empty() {
-        return Line::styled(
-            format!(" {}", app.status),
-            Style::default().fg(Color::Yellow),
-        );
-    }
-
     let (needed, spare) = app.budget();
     let fit = match spare {
         short if short < 0 => format!("{} rows short", -short),
@@ -570,16 +709,78 @@ fn status_line(app: &App) -> Line<'static> {
         spare => format!("{spare} spare"),
     };
 
-    Line::styled(
+    let dim = Style::default().fg(Color::DarkGray);
+    // Always what `enter` would do, so the row count is never about something
+    // other than the key about to be pressed.
+    let mut spans = vec![Span::styled(
         format!(
-            // The reminders run most useful first: an 80-column window cuts the
-            // line off, and what falls off the end should be the least missed.
-            " {} · {} · {needed} rows · {fit} · {} bright   enter apply  space add  x remove  tab panel  q quit",
+            " {} · {} · {needed} rows · {fit} · {} bright",
             app.panel(),
-            spec_of(&app.drafts[app.focus]),
+            spec_of(&app.effective()),
             app.brightness,
         ),
-        Style::default().fg(Color::DarkGray),
+        dim,
+    )];
+
+    if !app.status.is_empty() {
+        spans.push(Span::styled(
+            format!("   {}", app.status),
+            Style::default().fg(Color::Yellow),
+        ));
+    }
+
+    // Short enough to survive beside a message, and `?` covers the rest.
+    spans.push(Span::styled("   enter", Style::default().fg(Color::Gray)));
+    spans.push(Span::styled(" apply  ", dim));
+    spans.push(Span::styled("?", Style::default().fg(Color::Gray)));
+    spans.push(Span::styled(" help  ", dim));
+    spans.push(Span::styled("q", Style::default().fg(Color::Gray)));
+    spans.push(Span::styled(" quit", dim));
+    Line::from(spans)
+}
+
+/// Rows a stack of these scenes needs, rules between them included.
+fn rows_for(draft: &[SceneKind]) -> i32 {
+    let minimums: Vec<i32> = draft.iter().map(|kind| kind.min_height()).collect();
+    scene::needed_for(&minimums)
+}
+
+/// Columns the key names are right-aligned in.
+const KEY_COLUMN: usize = 14;
+
+/// Every key, in the order the help lists them.
+const KEYS: [(&str, &str); 9] = [
+    ("tab", "compose the other panel"),
+    ("↑ ↓  k j", "move through the scenes"),
+    ("space", "add the selected scene to the stack"),
+    ("x", "drop the last scene off the stack"),
+    ("c  esc", "drop what is being composed"),
+    ("enter", "show the selection, or the stack if any"),
+    ("+ -", "brightness, five at a time"),
+    ("?", "this help"),
+    ("q  ctrl-c", "leave"),
+];
+
+/// The help overlay, shown over the middle of the interface.
+fn help() -> Paragraph<'static> {
+    let lines: Vec<Line> = KEYS
+        .iter()
+        .map(|(key, what)| {
+            Line::from(vec![
+                Span::styled(
+                    format!("  {key:>KEY_COLUMN$}  "),
+                    Style::default().fg(Color::Yellow),
+                ),
+                Span::styled((*what).to_owned(), Style::default().fg(Color::Gray)),
+            ])
+        })
+        .collect();
+
+    Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" keys · any key closes ")
+            .border_style(Style::default().fg(Color::Yellow)),
     )
 }
 
@@ -601,11 +802,13 @@ mod tests {
         App {
             socket: PathBuf::from("/nonexistent/ledmat.sock"),
             frames: [crate::canvas::Canvas::new(), crate::canvas::Canvas::new()],
+            showing: [Vec::new(), Vec::new()],
             drafts: [Vec::new(), Vec::new()],
             focus: 0,
             selected: 0,
             brightness: 30,
             status: String::new(),
+            helping: false,
         }
     }
 
@@ -720,6 +923,29 @@ mod tests {
     }
 
     #[test]
+    fn the_catalogue_holds_the_longest_name_it_has() {
+        // The names grew from `spectrum` to `speakers-spectrum` once already;
+        // a hand-picked width would have clipped them without a word.
+        let longest = SceneKind::ALL
+            .iter()
+            .map(|kind| kind.to_string().chars().count())
+            .max()
+            .expect("the catalogue is not empty");
+        let entry = format!(
+            "> {:<width$} {:>2}",
+            "x".repeat(longest),
+            34,
+            width = super::name_column()
+        );
+        assert!(
+            usize::from(super::catalogue_ideal_width()) >= entry.chars().count() + 2,
+            "{} columns will not hold {:?}",
+            super::catalogue_ideal_width(),
+            entry
+        );
+    }
+
+    #[test]
     fn a_big_window_gets_margins_rather_than_a_stretched_catalogue() {
         use ratatui::layout::Rect;
 
@@ -754,6 +980,122 @@ mod tests {
         let block = super::centred(snug, Scale(1), 40);
         assert_eq!((block.width, block.height), (snug.width, snug.height));
         assert_eq!((block.x, block.y), (0, 0));
+    }
+
+    #[test]
+    fn a_scene_with_no_room_is_refused_at_the_keystroke() {
+        // The draft opens on what the panel already shows, so adding to a game
+        // built a stack that could never be applied — and said so only at
+        // `enter`, which read as `enter` doing nothing at all.
+        let mut app = app();
+        app.drafts[0] = vec![SceneKind::Snake];
+        app.selected = SceneKind::ALL
+            .iter()
+            .position(|kind| *kind == SceneKind::Clock)
+            .expect("clock is in the catalogue");
+
+        handle(&mut app, press(KeyCode::Char(' ')));
+        assert_eq!(
+            app.drafts[0],
+            vec![SceneKind::Snake],
+            "an impossible stack was built anyway"
+        );
+        assert!(app.status.contains("no room"), "no reason given");
+        assert!(app.status.contains('c'), "no way out offered");
+    }
+
+    #[test]
+    fn picking_one_scene_is_a_move_and_a_keystroke() {
+        // The common case by far. It used to cost three keys — clear, add,
+        // apply — because the draft opened pre-filled with what was showing.
+        let mut app = app();
+        app.showing[0] = vec![SceneKind::Snake];
+        app.selected = SceneKind::ALL
+            .iter()
+            .position(|kind| *kind == SceneKind::Clock)
+            .expect("clock is in the catalogue");
+
+        // Nothing composed, so the line already describes what enter would do.
+        assert_eq!(app.effective(), vec![SceneKind::Clock]);
+        assert_eq!(app.budget(), (11, 23));
+    }
+
+    #[test]
+    fn a_full_panel_is_no_obstacle_to_picking_another_scene() {
+        // Adding to a game is refused, but replacing it outright is the point
+        // of the tool and must not be caught by that refusal.
+        let mut app = app();
+        app.showing[0] = vec![SceneKind::Snake];
+        app.selected = SceneKind::ALL
+            .iter()
+            .position(|kind| *kind == SceneKind::Clock)
+            .expect("clock is in the catalogue");
+        assert!(app.budget().1 >= 0, "picking a scene hit the row budget");
+    }
+
+    #[test]
+    fn a_message_never_takes_the_keys_away() {
+        // The whole line used to become the message, reminders and all, and
+        // nothing put them back: one keystroke and the interface looked inert.
+        let mut app = app();
+        app.drafts[0] = vec![SceneKind::Clock];
+        app.status = "nothing to apply".to_owned();
+
+        let line: String = status_line(&app)
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(line.contains("nothing to apply"), "the message is gone");
+        assert!(line.contains("clock"), "the draft is gone: {line}");
+        assert!(line.contains("? help"), "the way in is gone: {line}");
+        assert!(line.contains("enter apply"), "applying is unadvertised");
+    }
+
+    #[test]
+    fn the_next_key_puts_the_message_away() {
+        let mut app = app();
+        app.status = "nothing to apply".to_owned();
+        handle(&mut app, press(KeyCode::Tab));
+        assert!(app.status.is_empty(), "the message outstayed its keystroke");
+    }
+
+    #[test]
+    fn the_help_lists_every_key_and_any_key_closes_it() {
+        let mut app = app();
+        handle(&mut app, press(KeyCode::Char('?')));
+        assert!(app.helping, "? did not open the help");
+
+        let mut listed = String::new();
+        for (key, what) in super::KEYS {
+            listed.push_str(key);
+            listed.push(' ');
+            listed.push_str(what);
+            listed.push(' ');
+        }
+        for expected in ["tab", "space", "enter", "?", "ctrl-c"] {
+            assert!(listed.contains(expected), "{expected} is not documented");
+        }
+        // The box has to hold the longest line, or the help itself is unhelpful.
+        let longest = super::KEYS
+            .iter()
+            .map(|(key, what)| {
+                key.chars().count().max(super::KEY_COLUMN) + what.chars().count() + 6
+            })
+            .max()
+            .unwrap_or(0);
+        let area = super::help_area(ratatui::layout::Rect::new(0, 0, 200, 60));
+        assert!(
+            usize::from(area.width) >= longest,
+            "the help is {} wide and needs {longest}",
+            area.width
+        );
+
+        // Any key at all, and it must not also act on what is underneath.
+        let before = app.drafts[0].clone();
+        handle(&mut app, press(KeyCode::Char(' ')));
+        assert!(!app.helping, "the help would not close");
+        assert_eq!(app.drafts[0], before, "the key fell through to the draft");
     }
 
     #[test]
@@ -803,14 +1145,20 @@ mod tests {
 
     #[test]
     fn removing_takes_the_last_scene_off() {
+        // Two scenes that fit together: a pair of games never could, and is
+        // now refused outright rather than stacked into something unusable.
         let mut app = app();
+        app.selected = SceneKind::ALL
+            .iter()
+            .position(|kind| *kind == SceneKind::Cpu)
+            .expect("cpu is in the catalogue");
         handle(&mut app, press(KeyCode::Char(' ')));
         handle(&mut app, press(KeyCode::Down));
         handle(&mut app, press(KeyCode::Char(' ')));
-        assert_eq!(app.drafts[0].len(), 2);
+        assert_eq!(app.drafts[0], vec![SceneKind::Cpu, SceneKind::Ram]);
 
         handle(&mut app, press(KeyCode::Char('x')));
-        assert_eq!(app.drafts[0], vec![SceneKind::ALL[0]]);
+        assert_eq!(app.drafts[0], vec![SceneKind::Cpu]);
 
         handle(&mut app, press(KeyCode::Char('c')));
         assert!(app.drafts[0].is_empty(), "clearing left something behind");
@@ -829,7 +1177,11 @@ mod tests {
     fn quitting_is_the_only_thing_that_ends_the_loop() {
         let mut app = app();
         assert!(handle(&mut app, press(KeyCode::Char('q'))));
-        assert!(handle(&mut app, press(KeyCode::Esc)));
+        // Esc backs out of a draft; leaving on it was a trap for a key people
+        // press to cancel.
+        app.drafts[0] = vec![SceneKind::Clock];
+        assert!(!handle(&mut app, press(KeyCode::Esc)));
+        assert!(app.drafts[0].is_empty(), "esc no longer cancels");
         assert!(!handle(&mut app, press(KeyCode::Tab)));
         assert!(
             !handle(&mut app, press(KeyCode::Enter)),
