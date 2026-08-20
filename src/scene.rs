@@ -5,6 +5,7 @@
 
 pub mod battery;
 pub mod clock;
+pub mod invaders;
 pub mod load;
 pub mod media;
 pub mod pong;
@@ -24,6 +25,7 @@ use crate::canvas::{self, Canvas};
 use crate::device::ColorMode;
 use battery::BatteryGauge;
 use clock::Clock;
+use invaders::Invaders;
 use load::{Load, Source};
 use media::Media;
 use pong::Pong;
@@ -103,6 +105,8 @@ pub enum SceneKind {
     Snake,
     /// Tetris, played by a robot that scores every landing.
     Tetris,
+    /// Space Invaders, played by a robot gunner.
+    Invaders,
     /// The time of day, hours stacked over minutes.
     Clock,
     /// Share of processor time in use.
@@ -129,10 +133,11 @@ pub enum SceneKind {
 
 impl SceneKind {
     /// Every scene, in the order a catalogue should list them.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::Pong,
         Self::Snake,
         Self::Tetris,
+        Self::Invaders,
         Self::Clock,
         Self::Cpu,
         Self::Ram,
@@ -153,7 +158,7 @@ impl SceneKind {
     pub const fn min_height(self) -> i32 {
         match self {
             // A game played on a strip is not the same game.
-            Self::Pong | Self::Snake | Self::Tetris => canvas::HEIGHT,
+            Self::Pong | Self::Snake | Self::Tetris | Self::Invaders => canvas::HEIGHT,
             Self::Clock => clock::MIN_HEIGHT,
             Self::Cpu | Self::Ram => load::MIN_HEIGHT,
             Self::Net | Self::Disk => traffic::MIN_HEIGHT,
@@ -174,7 +179,12 @@ impl SceneKind {
     #[must_use]
     pub fn preferred_color_mode(self) -> ColorMode {
         match self {
-            Self::Pong | Self::Snake | Self::Tetris | Self::Spectrum | Self::Mic => ColorMode::Bw,
+            Self::Pong
+            | Self::Snake
+            | Self::Tetris
+            | Self::Invaders
+            | Self::Spectrum
+            | Self::Mic => ColorMode::Bw,
             // Widgets change a few times a minute at most, and an unchanged
             // frame is never resent, so their shading is effectively free.
             Self::Clock
@@ -196,6 +206,7 @@ impl fmt::Display for SceneKind {
             Self::Pong => "pong",
             Self::Snake => "snake",
             Self::Tetris => "tetris",
+            Self::Invaders => "invaders",
             Self::Clock => "clock",
             Self::Cpu => "cpu",
             Self::Ram => "ram",
@@ -228,6 +239,8 @@ pub enum AnyScene {
     Snake(Snake),
     /// See [`Tetris`].
     Tetris(Tetris),
+    /// See [`Invaders`].
+    Invaders(Invaders),
     /// See [`Clock`].
     Clock(Clock),
     /// See [`Load`].
@@ -259,6 +272,7 @@ impl AnyScene {
             SceneKind::Pong => Some(Self::Pong(Pong::new(seed, mode))),
             SceneKind::Snake => Some(Self::Snake(Snake::new(seed, mode))),
             SceneKind::Tetris => Some(Self::Tetris(Tetris::new(seed, mode))),
+            SceneKind::Invaders => Some(Self::Invaders(Invaders::new(seed, mode))),
             SceneKind::Clock => Some(Self::Clock(Clock::new(mode))),
             SceneKind::Cpu => Some(Self::Load(Load::new(Source::Cpu, mode))),
             SceneKind::Ram => Some(Self::Load(Load::new(Source::Memory, mode))),
@@ -314,6 +328,7 @@ impl Scene for AnyScene {
             Self::Pong(scene) => scene.min_height(),
             Self::Snake(scene) => scene.min_height(),
             Self::Tetris(scene) => scene.min_height(),
+            Self::Invaders(scene) => scene.min_height(),
             Self::Clock(scene) => scene.min_height(),
             Self::Load(scene) => scene.min_height(),
             Self::Traffic(scene) => scene.min_height(),
@@ -330,6 +345,7 @@ impl Scene for AnyScene {
             Self::Pong(scene) => scene.name(),
             Self::Snake(scene) => scene.name(),
             Self::Tetris(scene) => scene.name(),
+            Self::Invaders(scene) => scene.name(),
             Self::Clock(scene) => scene.name(),
             Self::Load(scene) => scene.name(),
             Self::Traffic(scene) => scene.name(),
@@ -346,6 +362,7 @@ impl Scene for AnyScene {
             Self::Pong(scene) => scene.update(delta),
             Self::Snake(scene) => scene.update(delta),
             Self::Tetris(scene) => scene.update(delta),
+            Self::Invaders(scene) => scene.update(delta),
             Self::Clock(scene) => scene.update(delta),
             Self::Load(scene) => scene.update(delta),
             Self::Traffic(scene) => scene.update(delta),
@@ -362,6 +379,7 @@ impl Scene for AnyScene {
             Self::Pong(scene) => scene.render(canvas, area),
             Self::Snake(scene) => scene.render(canvas, area),
             Self::Tetris(scene) => scene.render(canvas, area),
+            Self::Invaders(scene) => scene.render(canvas, area),
             Self::Clock(scene) => scene.render(canvas, area),
             Self::Load(scene) => scene.render(canvas, area),
             Self::Traffic(scene) => scene.render(canvas, area),

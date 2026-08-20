@@ -159,6 +159,7 @@ pub fn scene_from_str(name: &str) -> Result<SceneKind> {
         "pong" => Ok(SceneKind::Pong),
         "snake" => Ok(SceneKind::Snake),
         "tetris" => Ok(SceneKind::Tetris),
+        "invaders" => Ok(SceneKind::Invaders),
         "clock" => Ok(SceneKind::Clock),
         "cpu" => Ok(SceneKind::Cpu),
         "ram" => Ok(SceneKind::Ram),
