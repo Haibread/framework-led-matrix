@@ -30,9 +30,11 @@ Nine scenes ship today. Four games, playing on their own:
   head and a new game starts. Dying, which is rare, flashes instead.
 - **invaders** — nine columns is exactly a rank of invaders, which is why this
   one fits a panel that defeats most games. The gunner leads its shots, because
-  a bullet takes most of a second to climb and the rank walks a pixel a step;
-  it dodges by moving to a safe column rather than one pixel aside, which used
-  to walk it back under the same bomb. It loses about half its runs.
+  a bullet takes most of a second to climb and the rank walks a pixel a step,
+  and it shelters behind the bunkers rather than running the length of the
+  panel. Three lives, and waves that cycle through four different ranks: a rank
+  spanning most of the width turns at a wall every other step and descends with
+  every turn, so the wide ones are the ones that come down on you.
 - **tetris** — tries every rotation in every column, drops the piece and scores
   the well it would leave behind. Buried holes weigh heaviest, because they are
   what actually ends a game; a bot that only chased line clears would top out in
