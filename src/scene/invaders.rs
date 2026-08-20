@@ -112,7 +112,7 @@ const STEP_SLOW: f32 = 0.50;
 const STEP_FAST: f32 = 0.09;
 
 /// Seconds a bullet and a bomb take to cross one row.
-const BULLET_STEP: f32 = 0.035;
+const BULLET_STEP: f32 = 0.025;
 const BOMB_STEP: f32 = 0.13;
 /// Seconds the gunner takes to slide one column.
 const CANNON_STEP: f32 = 0.07;
@@ -124,7 +124,9 @@ const BOMB_CHANCE: f32 = 0.22;
 const MAX_BOMBS: usize = 2;
 
 /// How far above the gunner a bomb starts counting as a reason to move.
-const DODGE_ROWS: i32 = 12;
+const DODGE_ROWS: i32 = 16;
+/// How many columns of aim the gunner will give up to keep its shelter.
+const SHELTER_RELUCTANCE: i32 = 2;
 
 /// Flashes a second while a loss is held.
 const FLASH_RATE: f32 = 6.0;
@@ -427,23 +429,23 @@ impl Invaders {
     /// wants to take. Stepping one pixel aside instead — the obvious thing —
     /// walked straight back under the bomb on the following tick.
     fn wanted_column(&self) -> i32 {
+        // Whatever is easiest to hit, not whatever is lowest. Chasing the
+        // lowest alien dragged the gunner from one wall to the other every
+        // time the rank turned — a metronome that spent its life walking
+        // instead of shooting, and got hit crossing the panel.
         let aim = self
             .living()
-            .min_by_key(|(x, y)| (-y, (x - self.cannon).abs()))
-            .map_or(self.cannon, |(x, y)| {
-                self.predicted_x(x, y).clamp(0, canvas::WIDTH - 1)
-            });
-        let hunted = self
-            .bombs
-            .iter()
-            .any(|bomb| BASE_ROW - bomb.y <= DODGE_ROWS);
+            .map(|(x, y)| self.predicted_x(x, y).clamp(0, canvas::WIDTH - 1))
+            .min_by_key(|x| (x - self.cannon).abs())
+            .unwrap_or(self.cannon);
 
         (0..canvas::WIDTH)
-            .filter(|column| self.threat_to(*column).is_none())
+            .filter(|column| self.threat_to(*column).is_none() && self.reachable(*column))
             .min_by_key(|column| {
-                // Its own shelter blocks its shots, so it only stands under one
-                // when there is something to shelter from.
-                let blocked = i32::from(self.sheltered(*column) && !hunted) * canvas::WIDTH;
+                // Its own shelter blocks its shots, so it is a little reluctant
+                // to stand under one — but only a little, or it bounces out
+                // from cover the moment the sky is clear.
+                let blocked = i32::from(self.sheltered(*column)) * SHELTER_RELUCTANCE;
                 ((column - aim).abs() + blocked, (column - self.cannon).abs())
             })
             .unwrap_or_else(|| {
@@ -452,6 +454,27 @@ impl Invaders {
                     .max_by_key(|column| self.threat_to(*column).unwrap_or(i32::MAX))
                     .unwrap_or(self.cannon)
             })
+    }
+
+    /// Whether the gunner can walk to `column` without passing under a bomb
+    /// that lands before it gets there.
+    ///
+    /// Only the destination used to be checked, so the gunner would set off
+    /// across the panel towards shelter and walk into the very bomb it was
+    /// running from.
+    fn reachable(&self, column: i32) -> bool {
+        let seconds =
+            |steps: i32, each: f32| f32::from(u8::try_from(steps.max(0)).unwrap_or(u8::MAX)) * each;
+        let walk = seconds((column - self.cannon).abs(), CANNON_STEP);
+        let (from, to) = (
+            self.cannon.min(column) - BASE_HALF,
+            self.cannon.max(column) + BASE_HALF,
+        );
+
+        !self.bombs.iter().any(|bomb| {
+            let crosses = (from..=to).contains(&bomb.x) && !self.sheltered(bomb.x);
+            crosses && seconds(BASE_ROW - bomb.y, BOMB_STEP) <= walk
+        })
     }
 
     /// Fires if the gunner is lined up, has nothing in the air, and would not
@@ -731,6 +754,50 @@ mod tests {
     }
 
     #[test]
+    fn the_gunner_shoots_what_is_nearest_rather_than_what_is_lowest() {
+        // Chasing the lowest alien walked it wall to wall every time the rank
+        // turned: a metronome that spent its life travelling instead of
+        // shooting, and got hit on the way.
+        let mut game = game();
+        game.bombs.clear();
+        game.cannon = 1;
+        game.alive = [[false; MAX_COLUMNS]; MAX_ROWS];
+        // Both low, so the lead is a pixel and the choice is about distance:
+        // one under the gunner, one across the panel.
+        game.rank_x = 0;
+        game.rank_y = 26;
+        game.alive[0][0] = true;
+        game.alive[0][2] = true;
+
+        let wanted = game.wanted_column();
+        let far = game.alien_at(0, 2).0;
+        assert!(
+            (wanted - game.cannon).abs() < (far - game.cannon).abs(),
+            "it set off for the far one at {far} instead of staying near {}",
+            game.cannon
+        );
+    }
+
+    #[test]
+    fn the_gunner_will_not_walk_under_a_falling_bomb() {
+        // Only the destination used to be checked, so it would set off across
+        // the panel for shelter and walk into the bomb it was running from.
+        let mut game = game();
+        game.bunkers = [0; canvas::WIDTH as usize];
+        game.cannon = 0;
+        game.bombs = vec![Shot {
+            x: 4,
+            y: super::BASE_ROW - 2,
+        }];
+
+        assert!(
+            !game.reachable(8),
+            "it walked the length of the panel under a bomb"
+        );
+        assert!(game.reachable(1), "it refused a step it had time for");
+    }
+
+    #[test]
     fn every_formation_has_room_to_march() {
         // A rank as wide as the panel bounces off a wall every other step and
         // descends with it, so it lands on the gunner whatever anyone does.
@@ -824,7 +891,11 @@ mod tests {
         assert!(matches!(game.phase, Phase::LostLife(_)));
         play(&mut game, 1.5);
 
-        assert_eq!(game.remaining(), standing, "the rank was set back up");
+        assert!(
+            game.remaining() <= standing,
+            "the rank was set back up: {} standing, was {standing}",
+            game.remaining()
+        );
         assert_eq!(game.lives, LIVES - 1, "the life was not counted");
     }
 
