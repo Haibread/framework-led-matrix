@@ -21,6 +21,8 @@ const POLL_INTERVAL: Duration = Duration::from_millis(400);
 pub const MIN_HEIGHT: i32 = 5;
 /// Rows from which the bar becomes a column of its own.
 const TALL_HEIGHT: i32 = 12;
+/// Past this the cone would be wider than the panel.
+const MAX_SCALE: i32 = 3;
 
 const SPEAKER_LEVEL: u8 = 200;
 const MUTED_LEVEL: u8 = 60;
@@ -76,12 +78,17 @@ impl Volume {
         }
     }
 
-    /// The speaker cone, three pixels wide, growing to the right.
-    fn draw_speaker(canvas: &mut Canvas, x: i32, top: i32, level: u8) {
+    /// The speaker cone, three pixels wide before scaling, growing to the right.
+    ///
+    /// Each pixel of the shape becomes a `scale` by `scale` block, so the cone
+    /// grows with the room it is given like every other widget here. Drawn at
+    /// one size on a whole panel it was a pictogram lost in the dark.
+    fn draw_speaker(canvas: &mut Canvas, x: i32, top: i32, level: u8, scale: i32) {
         for (row, bits) in [0b001, 0b011, 0b111, 0b011, 0b001].into_iter().enumerate() {
             for column in 0..3 {
                 if bits & (1 << column) != 0 {
-                    canvas.set_max(x + column, top + i32::try_from(row).unwrap_or(0), level);
+                    let row = i32::try_from(row).unwrap_or(0);
+                    fill(canvas, x + column * scale, top + row * scale, scale, level);
                 }
             }
         }
@@ -108,16 +115,23 @@ impl Scene for Volume {
         };
 
         if area.height >= TALL_HEIGHT {
-            // Room for the speaker over a full-width bar.
-            let top = area.top + (area.height - MIN_HEIGHT) / 2 - 2;
-            Self::draw_speaker(canvas, 3, top, speaker_level);
+            // The speaker sits at the top, as large as the band allows, over a
+            // full-width bar taking whatever is left.
+            let scale = (area.height / TALL_HEIGHT).clamp(1, MAX_SCALE);
+            let width = 3 * scale;
+            let x = (canvas::WIDTH - width) / 2;
+            let top = area.top + 1;
+            Self::draw_speaker(canvas, x, top, speaker_level, scale);
+
             if reading.muted {
-                draw_cross(canvas, 3, top);
+                draw_cross(canvas, x, top, scale);
                 return;
             }
-            let rows = area.bottom() - (top + 6);
+
+            let bar_top = top + MIN_HEIGHT * scale + 1;
+            let rows = (area.bottom() - bar_top + 1).max(0);
             let filled =
-                canvas::to_pixel(reading.level * f32::from(u8::try_from(rows.max(0)).unwrap_or(0)));
+                canvas::to_pixel(reading.level * f32::from(u8::try_from(rows).unwrap_or(0)));
             for step in 0..filled {
                 canvas.hline(0, canvas::WIDTH - 1, area.bottom() - step, u8::MAX);
             }
@@ -125,12 +139,12 @@ impl Scene for Volume {
         }
 
         let top = area.top + (area.height - MIN_HEIGHT).max(0) / 2;
-        Self::draw_speaker(canvas, 0, top, speaker_level);
+        Self::draw_speaker(canvas, 0, top, speaker_level, 1);
 
         if reading.muted {
             // A cross beside the cone, because a bar at zero and a muted sink
             // look identical otherwise.
-            draw_cross(canvas, 4, top);
+            draw_cross(canvas, 4, top, 1);
             return;
         }
 
@@ -143,11 +157,21 @@ impl Scene for Volume {
     }
 }
 
-/// A three-by-three cross, for the muted state.
-fn draw_cross(canvas: &mut Canvas, x: i32, top: i32) {
+/// A three-by-three cross, scaled to match the cone it is drawn over.
+fn draw_cross(canvas: &mut Canvas, x: i32, top: i32, scale: i32) {
     for step in 0..3 {
-        canvas.set_max(x + step, top + 1 + step, u8::MAX);
-        canvas.set_max(x + 2 - step, top + 1 + step, u8::MAX);
+        let row = top + (1 + step) * scale;
+        fill(canvas, x + step * scale, row, scale, u8::MAX);
+        fill(canvas, x + (2 - step) * scale, row, scale, u8::MAX);
+    }
+}
+
+/// One pixel of a shape, as a `scale` by `scale` block.
+fn fill(canvas: &mut Canvas, x: i32, y: i32, scale: i32, level: u8) {
+    for row in 0..scale {
+        for column in 0..scale {
+            canvas.set_max(x + column, y + row, level);
+        }
     }
 }
 
@@ -174,6 +198,30 @@ mod tests {
         let mut canvas = Canvas::new();
         showing(reading).render(&mut canvas, Area { top: 0, height });
         canvas
+    }
+
+    #[test]
+    fn the_speaker_grows_with_the_panel_it_is_on() {
+        // Muted on a whole panel drew a three-by-five pictogram and nothing
+        // else: a small square adrift in the dark, which is exactly what it
+        // was reported as.
+        let muted = Reading {
+            level: 0.0,
+            muted: true,
+        };
+        let lit = |height| {
+            let canvas = drawn(muted, height);
+            (0..9)
+                .flat_map(|x| (0..34).map(move |y| (x, y)))
+                .filter(|(x, y)| canvas.get(*x, *y) > 0)
+                .count()
+        };
+        assert!(
+            lit(34) > lit(TALL_HEIGHT) * 3,
+            "a whole panel drew barely more than a band: {} against {}",
+            lit(34),
+            lit(TALL_HEIGHT)
+        );
     }
 
     #[test]
