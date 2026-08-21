@@ -202,10 +202,15 @@ const _: () = assert!(MAX_COMMAND_LEN <= FIRMWARE_READ_BUFFER);
 
 /// Bit-packs the canvas as the payload of one `DisplayBwImage` command.
 ///
-/// The firmware reads bit `x + WIDTH * y`, least significant bit first, and
-/// writes it to column `8 - x` — this path mirrors the image, while the
-/// greyscale path does not. The flip is undone here so both modes show the same
-/// picture rather than each other's reflection.
+/// Bit `x + WIDTH * y`, least significant bit first, lights the LED at column
+/// `x` — the same way round as the greyscale path.
+///
+/// This used to flip the axis, on the belief that the firmware mirrored this
+/// command and had to be compensated for. It does not. Nothing caught it for
+/// months because every scene that runs in black and white — two paddles, a
+/// snake, falling blocks, a rank of invaders — is near enough symmetric that a
+/// reflection is invisible. It took writing a digit on the panel, the first
+/// thing drawn here with a right way round, to see it.
 fn encode_bw(canvas: &Canvas) -> [u8; DRAW_BYTES] {
     let mut bytes = [0u8; DRAW_BYTES];
 
@@ -214,7 +219,7 @@ fn encode_bw(canvas: &Canvas) -> [u8; DRAW_BYTES] {
             if canvas.get(x, y) < BW_THRESHOLD {
                 continue;
             }
-            let Ok(index) = usize::try_from(canvas::WIDTH - 1 - x + canvas::WIDTH * y) else {
+            let Ok(index) = usize::try_from(x + canvas::WIDTH * y) else {
                 continue;
             };
             bytes[index / 8] |= 1 << (index % 8);
@@ -375,22 +380,42 @@ mod tests {
 
     #[test]
     fn black_and_white_bits_land_where_the_firmware_looks_for_them() {
-        // The firmware reads bit `x + WIDTH * y` and writes it to column
-        // `8 - x`, so the encoder has to mirror to compensate. Getting this
-        // wrong yields a picture that is subtly reflected — easy to miss on
-        // symmetric scenes and maddening to debug later.
+        // Bit `x + WIDTH * y` lights column `x`, the same way round as the
+        // greyscale path. This used to assert the opposite, and so kept a
+        // mirrored picture in place: every black and white scene is close
+        // enough to symmetric that the reflection never showed, until a digit
+        // was written on the panel.
         let mut canvas = Canvas::new();
         canvas.set(0, 0, 255);
 
         let bytes = encode_bw(&canvas);
-        // Lighting column 0 must set the bit the firmware maps back to column 0,
-        // which is index 8.
+        assert_eq!(bytes[0], 0b0000_0001, "column 0 did not set bit 0");
+        assert_eq!(bytes[1], 0, "a lone pixel lit a second byte");
+    }
+
+    #[test]
+    fn the_two_modes_agree_on_which_way_round_the_panel_is() {
+        // The bug this replaces lived between the two paths: greyscale drew a
+        // picture and black and white drew its reflection. Nothing compared
+        // them, so nothing noticed.
+        let mut canvas = Canvas::new();
+        canvas.set(0, 5, 255);
+
+        let bytes = encode_bw(&canvas);
+        let mut column = Vec::new();
+        encode_column(&canvas, 0, &mut column);
+
+        // Greyscale names the column outright; black and white has to agree.
         assert_eq!(
-            bytes[1], 0b0000_0001,
-            "expected bit 8, got {:08b}",
-            bytes[1]
+            column[MAGIC.len() + 1],
+            0,
+            "greyscale staged another column"
         );
-        assert_eq!(bytes[0], 0, "something lit the first eight columns");
+        let index = usize::try_from(crate::canvas::WIDTH * 5).expect("a panel");
+        assert!(
+            bytes[index / 8] & (1 << (index % 8)) != 0,
+            "black and white lit a different column from greyscale"
+        );
     }
 
     #[test]
@@ -399,8 +424,10 @@ mod tests {
         canvas.set(8, 33, 255);
 
         let bytes = encode_bw(&canvas);
-        // Column 8 of the last row is index (8 - 8) + 9 * 33 = 297.
-        assert_eq!(bytes[297 / 8] & (1 << (297 % 8)), 1 << (297 % 8));
+        // Column 8 of the last row is index 8 + 9 * 33 = 305, the last bit
+        // of the payload: the far corner is what catches an encoder that is
+        // one pixel or one axis out.
+        assert_eq!(bytes[305 / 8] & (1 << (305 % 8)), 1 << (305 % 8));
     }
 
     #[test]
@@ -427,8 +454,8 @@ mod tests {
 
         let bytes = encode_bw(&canvas);
         assert_ne!(bytes, [0u8; DRAW_BYTES], "the snake tail went dark");
-        assert_eq!(bytes[1], 0b0000_0001, "only the tail should be lit");
-        assert_eq!(bytes[0], 0);
+        assert_eq!(bytes[0], 0b0000_0001, "only the tail should be lit");
+        assert_eq!(bytes[1], 0);
     }
 
     #[test]
