@@ -394,6 +394,33 @@ mod tests {
     }
 
     #[test]
+    fn a_picture_survives_the_wire_unchanged() {
+        // Decoding the payload back and comparing it to what went in is the
+        // only check that catches a whole-axis mistake: every other test here
+        // asserts against the encoder's own idea of the format, which is
+        // exactly what was wrong for six days. Text is the case that matters,
+        // because it is the only thing drawn that has a right way round.
+        let mut canvas = Canvas::new();
+        crate::font::draw_digit(&mut canvas, 2, 0, 0, 255);
+        crate::font::draw_digit(&mut canvas, 7, 5, 28, 255);
+        canvas.set(0, 17, 255);
+        canvas.set(crate::canvas::WIDTH - 1, 33, 255);
+
+        let bytes = encode_bw(&canvas);
+        for y in 0..crate::canvas::HEIGHT {
+            for x in 0..crate::canvas::WIDTH {
+                let index = usize::try_from(x + crate::canvas::WIDTH * y).expect("a panel");
+                let lit = bytes[index / 8] & (1 << (index % 8)) != 0;
+                assert_eq!(
+                    lit,
+                    canvas.get(x, y) >= BW_THRESHOLD,
+                    "the wire disagrees with the canvas at {x},{y}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn the_two_modes_agree_on_which_way_round_the_panel_is() {
         // The bug this replaces lived between the two paths: greyscale drew a
         // picture and black and white drew its reflection. Nothing compared
