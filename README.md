@@ -18,7 +18,7 @@ Colour mode is a property of the scene, not a global setting: a game wants
 motion and takes black and white, while a widget that changes once a second can
 afford the shading. `--color-mode` overrides that per run.
 
-Nine scenes ship today. Four games, playing on their own:
+Fourteen scenes ship today. Four games, playing on their own:
 
 - **pong** — two robot paddles with capped speed, a reaction delay and a fresh
   aiming error each exchange, so rallies end in actual points instead of running
@@ -31,19 +31,19 @@ Nine scenes ship today. Four games, playing on their own:
 - **invaders** — nine columns is exactly a rank of invaders, which is why this
   one fits a panel that defeats most games. The gunner leads its shots, because
   a bullet takes most of a second to climb and the rank walks a pixel a step,
-  and it shoots whatever is nearest rather than whatever is lowest — chasing
-  the lowest alien walked it wall to wall every time the rank turned. It checks
-  the path before crossing, having previously walked into the bomb it was
-  running from. Three lives, bunkers that take two hits each, and waves that
-  cycle through four different ranks: a rank spanning most of the width turns
-  at a wall every other step and descends with every turn, so the wide ones are
-  the ones that come down on you.
+  and it shoots whatever is nearest rather than whatever is lowest. Three
+  lives, two-row bunkers that visibly crumble, and waves that cycle through
+  four ranks while the sky gets steadily busier — a run ends somewhere around
+  the twentieth wave, and it is the difficulty catching up that ends it rather
+  than a mistake. The wave number is written out during the beat between waves,
+  since it is the only thing that says how far a run has got. Losing a life
+  bursts where the gunner stood; only the end of a run takes the whole panel.
 - **tetris** — tries every rotation in every column, drops the piece and scores
   the well it would leave behind. Buried holes weigh heaviest, because they are
   what actually ends a game; a bot that only chased line clears would top out in
   under a minute.
 
-And five widgets, which read the machine rather than play. Each takes what it is
+And the widgets, which read the machine rather than play. Each takes what it is
 given and shows more detail with more rows:
 
 | Scene | Least it needs | What it does with more |

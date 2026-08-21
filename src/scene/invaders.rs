@@ -17,6 +17,7 @@ use rand::rngs::StdRng;
 
 use crate::canvas::{self, Canvas};
 use crate::device::ColorMode;
+use crate::font;
 use crate::scene::{Area, Scene, rng_from};
 
 /// The largest rank a wave can field.
@@ -93,6 +94,12 @@ const MUZZLE_ROW: i32 = canvas::HEIGHT - 2;
 const BASE_ROW: i32 = canvas::HEIGHT - 1;
 /// The base is three wide, so one pixel either side of its centre.
 const BASE_HALF: i32 = 1;
+/// Where a shot appears, leaving a dark row between the gunner and its own
+/// bullet. The muzzle is a lone lit pixel and so is a bullet: launched one row
+/// up they touched, and the pair read as a single two-pixel object that then
+/// tore itself in half. A gap is the only thing that separates them in black
+/// and white.
+const LAUNCH_ROW: i32 = MUZZLE_ROW - 2;
 /// Lives a run starts with. Losing one keeps the wave; losing the last starts
 /// the run over.
 const LIVES: u8 = 3;
@@ -117,19 +124,53 @@ const BOMB_STEP: f32 = 0.13;
 /// Seconds the gunner takes to slide one column.
 const CANNON_STEP: f32 = 0.07;
 
-/// Chance that the rank drops a bomb on any one of its steps.
+/// Chance that the rank drops a bomb on any one of its steps, and how much
+/// each wave adds to it.
 const BOMB_CHANCE: f32 = 0.22;
-/// Bombs in the air at once. Three of them on a panel nine wide leaves the
-/// gunner nowhere to stand, and a game it cannot win is not one to watch.
+const BOMB_CHANCE_PER_WAVE: f32 = 0.03;
+const MAX_BOMB_CHANCE: f32 = 0.55;
+
+/// Bombs in the air at once, and the wave from which a further one is allowed.
+///
+/// Four at once on a panel nine wide leaves the gunner nowhere to stand, so
+/// that is where a run ends rather than a difficulty it is expected to survive.
 const MAX_BOMBS: usize = 2;
+const BOMBS_CEILING: usize = 4;
+const WAVES_PER_BOMB: u32 = 4;
+
+/// How much of the step interval each wave takes off, and the floor.
+///
+/// A run has to get harder or it has no shape: with the arithmetic bugs fixed
+/// the gunner cleared waves indefinitely, and every wave past the fourth was
+/// pixel for pixel a wave it had already played.
+const SPEED_PER_WAVE: f32 = 0.04;
+const MIN_SPEED_SCALE: f32 = 0.55;
 
 /// How far above the gunner a bomb starts counting as a reason to move.
-const DODGE_ROWS: i32 = 16;
+///
+/// Sidestepping takes a seventh of a second; looking two seconds ahead made
+/// the gunner set off for trouble that had not happened yet, and put itself in
+/// danger more often than the sky did.
+const DODGE_ROWS: i32 = 8;
 /// How many columns of aim the gunner will give up to keep its shelter.
 const SHELTER_RELUCTANCE: i32 = 2;
 
+// A rank must be able to march, a wave must start above the row a shot can
+// reach, and every step must take time — a zero interval would spin `update`
+// for ever and freeze the panel in silence.
+const _: () = assert!(STEP_FAST > 0.0 && STEP_SLOW >= STEP_FAST);
+const _: () = assert!(LAUNCH_ROW > BUNKER_ROW && BUNKER_ROW > 1);
+// The wave label has to finish above the shelters it is written over.
+const _: () = assert!(WAVE_LABEL_ROW + font::GLYPH_HEIGHT < BUNKER_ROW);
+
 /// Flashes a second while a loss is held.
 const FLASH_RATE: f32 = 6.0;
+
+/// Where the wave just cleared is written, and how far the burst of a lost
+/// life reaches from the gunner. The label is five rows tall and has to clear
+/// the shelters below it.
+const WAVE_LABEL_ROW: i32 = 21;
+const BURST_RADIUS: i32 = 4;
 
 /// Seconds the end of a wave, a lost life and a lost run are held.
 const CLEARED_DELAY: f32 = 0.8;
@@ -138,9 +179,10 @@ const LOST_RUN_DELAY: f32 = 1.4;
 /// Longest simulated step, so a stalled thread does not teleport anything.
 const MAX_STEP: f32 = 0.1;
 
-/// Brightness of a bomb, a damaged bunker and a life still in hand.
+/// Brightness of a bomb and of a life still in hand, for the greyscale mode
+/// this scene does not use by default. Damage to a shelter is drawn as a shape
+/// rather than a shade, so it survives the black and white it actually runs in.
 const BOMB_LEVEL: u8 = 120;
-const BUNKER_DAMAGED_LEVEL: u8 = 90;
 const LIFE_LEVEL: u8 = 70;
 
 /// What the game is doing.
@@ -237,6 +279,9 @@ impl Invaders {
         let drop = i32::try_from(self.wave).unwrap_or(0) * WAVE_DROP;
         self.rank_y = START_Y + drop.min(MAX_WAVE_DROP);
         self.marching_right = true;
+        // Shelter for every wave. Rebuilt once a run, it was absent from the
+        // panel about half the time, taking the gunner's best trick with it.
+        self.rebuild_bunkers();
         self.clear_the_air();
     }
 
@@ -312,7 +357,26 @@ impl Invaders {
         let total = count(rows * columns).max(2.0);
         let standing = count(self.remaining());
         let fraction = ((standing - 1.0) / (total - 1.0)).clamp(0.0, 1.0);
-        STEP_FAST + (STEP_SLOW - STEP_FAST) * fraction
+        let thinning = STEP_FAST + (STEP_SLOW - STEP_FAST) * fraction;
+        thinning * self.speed_scale()
+    }
+
+    /// How much faster this wave marches than the first.
+    fn speed_scale(&self) -> f32 {
+        let waves = f32::from(u16::try_from(self.wave).unwrap_or(u16::MAX));
+        (1.0 - waves * SPEED_PER_WAVE).max(MIN_SPEED_SCALE)
+    }
+
+    /// Bombs this wave may have in the air at once.
+    fn bombs_allowed(&self) -> usize {
+        let extra = usize::try_from(self.wave / WAVES_PER_BOMB).unwrap_or(0);
+        MAX_BOMBS.saturating_add(extra).min(BOMBS_CEILING)
+    }
+
+    /// How likely the rank is to drop one on a given step.
+    fn bomb_chance(&self) -> f32 {
+        let waves = f32::from(u16::try_from(self.wave).unwrap_or(u16::MAX));
+        (BOMB_CHANCE + waves * BOMB_CHANCE_PER_WAVE).min(MAX_BOMB_CHANCE)
     }
 
     /// Marches the rank sideways, or down and back the other way at an edge.
@@ -341,7 +405,9 @@ impl Invaders {
 
     /// Drops a bomb from the lowest alien of a random living column.
     fn maybe_drop_bomb(&mut self) {
-        if self.bombs.len() >= MAX_BOMBS || self.rng.random::<f32>() >= BOMB_CHANCE {
+        if self.bombs.len() >= self.bombs_allowed()
+            || self.rng.random::<f32>() >= self.bomb_chance()
+        {
             return;
         }
 
@@ -367,8 +433,13 @@ impl Invaders {
 
     /// Alien steps that fit into a bullet's climb from the muzzle to row `y`.
     fn steps_while_a_shot_climbs(&self, y: i32) -> i32 {
-        let rows = f32::from(u8::try_from((MUZZLE_ROW - 1 - y).max(0)).unwrap_or(0));
-        canvas::floor_pixel(rows * BULLET_STEP / self.step_interval())
+        let rows = f32::from(u8::try_from((LAUNCH_ROW - y).max(0)).unwrap_or(0));
+        // Counting from zero assumed the rank steps the instant the shot goes
+        // off. It steps when its own timer comes round, so more than half of
+        // all flights took one step more than predicted — and a shot led one
+        // column short never hits anything.
+        let elapsed = rows * BULLET_STEP + self.step_timer;
+        canvas::floor_pixel(elapsed / self.step_interval())
     }
 
     /// Where an alien will be by the time a shot fired now could reach it.
@@ -412,13 +483,10 @@ impl Invaders {
     /// what makes the gunner duck behind the shelters instead of running the
     /// length of the panel.
     fn threat_to(&self, column: i32) -> Option<i32> {
-        if self.sheltered(column) {
-            return None;
-        }
         self.bombs
             .iter()
-            .filter(|bomb| (bomb.x - column).abs() <= BASE_HALF)
-            .map(|bomb| BASE_ROW - bomb.y)
+            .filter(|bomb| (bomb.x - column).abs() <= BASE_HALF && !self.sheltered(bomb.x))
+            .map(|bomb| MUZZLE_ROW - bomb.y)
             .filter(|rows| *rows <= DODGE_ROWS)
             .min()
     }
@@ -473,7 +541,11 @@ impl Invaders {
 
         !self.bombs.iter().any(|bomb| {
             let crosses = (from..=to).contains(&bomb.x) && !self.sheltered(bomb.x);
-            crosses && seconds(BASE_ROW - bomb.y, BOMB_STEP) <= walk
+            // A bomb kills on reaching the muzzle, a row above the base.
+            // Measuring to the base credited every one of them with an extra
+            // row — nearly two cannon steps — and that arithmetic was doing
+            // three quarters of the killing in this game.
+            crosses && seconds(MUZZLE_ROW - bomb.y, BOMB_STEP) <= walk
         })
     }
 
@@ -489,7 +561,7 @@ impl Invaders {
         if lined_up {
             self.bullet = Some(Shot {
                 x: self.cannon,
-                y: MUZZLE_ROW - 1,
+                y: LAUNCH_ROW,
             });
         }
     }
@@ -514,7 +586,11 @@ impl Invaders {
             return;
         };
         bullet.y -= 1;
-        if bullet.y < 0 {
+        // Spent at the guard row: going all the way to the top put a bullet in
+        // the lives row, where it read as an extra life, or on the dark row
+        // that keeps the pips countable. Aliens never climb above `START_Y`,
+        // so nothing becomes unshootable.
+        if bullet.y <= LIVES_ROW + 1 {
             self.bullet = None;
             return;
         }
@@ -539,30 +615,67 @@ impl Invaders {
     /// Moves every bomb down, and reports whether one reached the gunner.
     fn step_bombs(&mut self) -> bool {
         let mut hit = false;
-        let mut absorbed: Vec<i32> = Vec::new();
+        let mut spent: Vec<usize> = Vec::new();
 
-        for bomb in &mut self.bombs {
+        for index in 0..self.bombs.len() {
+            let bomb = &mut self.bombs[index];
             bomb.y += 1;
-            if bomb.y == BUNKER_ROW {
-                absorbed.push(bomb.x);
-            } else if bomb.y >= MUZZLE_ROW && (bomb.x - self.cannon).abs() <= BASE_HALF {
+            // At or below the shelter row, not exactly on it: a bomb born on
+            // that row from an alien standing over it stepped straight past
+            // and the equality never held, while the hit on the gunner one
+            // line down has always used `>=`.
+            let (x, y) = (bomb.x, bomb.y);
+            if y >= BUNKER_ROW && self.hit_bunker(x) {
+                // One hit per bomb. Collecting the columns and charging them
+                // afterwards let two bombs sharing a cell cost two hits and be
+                // stopped once between them.
+                spent.push(index);
+            } else if y >= MUZZLE_ROW && (x - self.cannon).abs() <= BASE_HALF {
                 hit = true;
             }
         }
 
-        let stopped: Vec<i32> = absorbed
-            .into_iter()
-            .filter(|column| self.hit_bunker(*column))
-            .collect();
+        let mut index = 0;
         self.bombs.retain(|bomb| {
-            bomb.y < canvas::HEIGHT && !(bomb.y == BUNKER_ROW && stopped.contains(&bomb.x))
+            let stopped = spent.contains(&index);
+            index += 1;
+            // Gone by the base row: one left sitting there made the gunner
+            // read as four wide, or as a bar with a lump beside it.
+            !stopped && bomb.y < BASE_ROW
         });
         hit
     }
 
-    /// Whether the rank has walked into the gunner.
+    /// Whether the rank has walked in past the point a shot can reach.
+    ///
+    /// Measured from the launch row, not the muzzle: `step_bullet` moves before
+    /// it tests, so an alien sitting on the launch row or below it can be lined
+    /// up, fired at, and never hit — a legal state that wastes the barrel for
+    /// the whole flight.
     fn rank_has_landed(&self) -> bool {
-        self.living().any(|(_, y)| y >= MUZZLE_ROW)
+        self.living().any(|(_, y)| y >= LAUNCH_ROW)
+    }
+
+    /// Lets everything in flight carry on while the game is between waves.
+    fn settle(&mut self, dt: f32) {
+        self.cannon_timer += dt;
+        while self.cannon_timer >= CANNON_STEP {
+            self.cannon_timer -= CANNON_STEP;
+            let home = canvas::WIDTH / 2;
+            self.cannon += (home - self.cannon).signum();
+        }
+
+        self.bullet_timer += dt;
+        while self.bullet_timer >= BULLET_STEP {
+            self.bullet_timer -= BULLET_STEP;
+            self.step_bullet();
+        }
+
+        self.bomb_timer += dt;
+        while self.bomb_timer >= BOMB_STEP {
+            self.bomb_timer -= BOMB_STEP;
+            self.step_bombs();
+        }
     }
 
     /// Takes a life, and says how long the panel should hold still for.
@@ -575,12 +688,62 @@ impl Invaders {
         }
     }
 
+    /// Writes the wave just finished, during the beat between waves.
+    ///
+    /// The only moment the panel has to spare, and the only thing that says
+    /// where a run has got to: without it every wave past the fourth looked
+    /// like one already played, and a run had no shape a watcher could see.
+    fn draw_wave(&self, canvas: &mut Canvas, area: Area) {
+        // The number of the wave cleared, counting from one.
+        let shown = (self.wave + 1) % 100;
+        let (tens, units) = (shown / 10, shown % 10);
+        let width = if tens > 0 {
+            font::GLYPH_WIDTH * 2 + 1
+        } else {
+            font::GLYPH_WIDTH
+        };
+        let left = (canvas::WIDTH - width) / 2;
+
+        if tens > 0 {
+            font::draw_digit(canvas, tens, left, area.row(WAVE_LABEL_ROW), u8::MAX);
+            font::draw_digit(
+                canvas,
+                units,
+                left + font::GLYPH_WIDTH + 1,
+                area.row(WAVE_LABEL_ROW),
+                u8::MAX,
+            );
+        } else {
+            font::draw_digit(canvas, units, left, area.row(WAVE_LABEL_ROW), u8::MAX);
+        }
+    }
+
+    /// The gunner coming apart where it stood.
+    ///
+    /// A lost life is a common event — one every couple of minutes — and it
+    /// used to fire the same full-panel white strobe as the end of a run,
+    /// under the owner's hands. A burst says the same thing where it happened.
+    fn draw_burst(&self, canvas: &mut Canvas, area: Area, age: f32) {
+        self.draw_game(canvas, area);
+
+        let reach = canvas::floor_pixel(age * f32::from(u8::try_from(BURST_RADIUS).unwrap_or(1)));
+        for step in 0..=reach.min(BURST_RADIUS) {
+            for x in [self.cannon - step, self.cannon + step] {
+                canvas.set_max(x, area.row(BASE_ROW), u8::MAX);
+                canvas.set_max(x, area.row(MUZZLE_ROW - step), u8::MAX);
+            }
+        }
+    }
+
     /// Draws the rank, the shelters, the gunner and everything in the air.
     fn draw_game(&self, canvas: &mut Canvas, area: Area) {
         for (x, y) in self.living() {
             canvas.set_max(x, area.row(y), u8::MAX);
         }
 
+        // Shading is not available here: this scene runs in black and white so
+        // that it can have thirty frames a second, and the greyscale levels
+        // below only ever apply if someone forces `--color-mode greyscale`.
         let dim = |level: u8| {
             if self.mode == ColorMode::Bw {
                 u8::MAX
@@ -592,13 +755,15 @@ impl Invaders {
             if *hits == 0 {
                 continue;
             }
-            let level = if *hits < BUNKER_HITS {
-                dim(BUNKER_DAMAGED_LEVEL)
-            } else {
-                u8::MAX
-            };
+            // Two rows, crumbling from the top. In black and white a single
+            // row has two pictures for three states, so a fresh shelter and
+            // one hit from collapse looked identical — and a half-dead pair
+            // read as two loose bombs rather than as shelter at all.
             let column = i32::try_from(column).unwrap_or(0);
-            canvas.set_max(column, area.row(BUNKER_ROW), level);
+            canvas.set_max(column, area.row(BUNKER_ROW), u8::MAX);
+            if *hits == BUNKER_HITS {
+                canvas.set_max(column, area.row(BUNKER_ROW - 1), u8::MAX);
+            }
         }
 
         for bomb in &self.bombs {
@@ -608,14 +773,20 @@ impl Invaders {
             canvas.set_max(bullet.x, area.row(bullet.y), u8::MAX);
         }
 
-        // A pip per life still in hand, on a row the rank never reaches.
-        for life in 0..i32::from(self.lives.saturating_sub(1)) {
-            canvas.set_max(life, area.row(LIVES_ROW), dim(LIFE_LEVEL));
+        // A pip per life still in hand, spaced so they can be counted: two
+        // adjacent pixels read as one bar through a diffuser. It used to draw
+        // one fewer than it had, so the last life showed an empty row.
+        for life in 0..i32::from(self.lives) {
+            canvas.set_max(life * 2, area.row(LIVES_ROW), dim(LIFE_LEVEL));
         }
 
+        // The base leans rather than clipping: `hline` used to lose a pixel at
+        // either wall, and a two-pixel corner does not read as a cannon. Only
+        // the footing moves — the muzzle, which is what aims, stays put.
+        let footing = self.cannon.clamp(BASE_HALF, canvas::WIDTH - 1 - BASE_HALF);
         canvas.hline(
-            self.cannon - BASE_HALF,
-            self.cannon + BASE_HALF,
+            footing - BASE_HALF,
+            footing + BASE_HALF,
             area.row(BASE_ROW),
             u8::MAX,
         );
@@ -639,13 +810,18 @@ impl Scene for Invaders {
         match self.phase {
             Phase::Cleared(remaining) => {
                 let remaining = remaining - dt;
-                self.phase = if remaining <= 0.0 {
+                if remaining <= 0.0 {
                     self.wave += 1;
                     self.start_wave();
-                    Phase::Playing
-                } else {
-                    Phase::Cleared(remaining)
-                };
+                    self.phase = Phase::Playing;
+                    return;
+                }
+                // The sky finishes emptying and the gunner walks home, rather
+                // than the panel holding a still image for eight tenths of a
+                // second — which happened sixty-six times in eleven minutes
+                // and is indistinguishable from a scene that has crashed.
+                self.phase = Phase::Cleared(remaining);
+                self.settle(dt);
                 return;
             }
             Phase::LostLife(remaining) => {
@@ -672,6 +848,17 @@ impl Scene for Invaders {
             Phase::Playing => {}
         }
 
+        // The bullet moves before the gun fires, so a shot is drawn on the row
+        // it launched from. Firing first meant every bullet stepped off that
+        // row before the frame was painted — the launch was invisible and the
+        // shot appeared level with the shelters, fused to them one time in
+        // seven. The gap under the muzzle only works if the launch is seen.
+        self.bullet_timer += dt;
+        while self.bullet_timer >= BULLET_STEP {
+            self.bullet_timer -= BULLET_STEP;
+            self.step_bullet();
+        }
+
         self.cannon_timer += dt;
         while self.cannon_timer >= CANNON_STEP {
             self.cannon_timer -= CANNON_STEP;
@@ -679,12 +866,6 @@ impl Scene for Invaders {
             self.cannon += (wanted - self.cannon).signum();
             self.cannon = self.cannon.clamp(0, canvas::WIDTH - 1);
             self.maybe_fire();
-        }
-
-        self.bullet_timer += dt;
-        while self.bullet_timer >= BULLET_STEP {
-            self.bullet_timer -= BULLET_STEP;
-            self.step_bullet();
         }
 
         self.bomb_timer += dt;
@@ -713,8 +894,12 @@ impl Scene for Invaders {
 
     fn render(&self, canvas: &mut Canvas, area: Area) {
         match self.phase {
-            Phase::LostLife(remaining) | Phase::LostRun(remaining) => {
-                // Flashing says the gunner lost without needing a word for it.
+            Phase::LostLife(remaining) => {
+                self.draw_burst(canvas, area, LOST_LIFE_DELAY - remaining);
+            }
+            Phase::LostRun(remaining) => {
+                // The whole panel, for the one event that ends a run. Rare
+                // enough now to be worth the light.
                 if canvas::floor_pixel(remaining * FLASH_RATE) % 2 == 0 {
                     for y in 0..area.height {
                         canvas.hline(0, canvas::WIDTH - 1, area.row(y), u8::MAX);
@@ -723,7 +908,11 @@ impl Scene for Invaders {
                     self.draw_game(canvas, area);
                 }
             }
-            Phase::Cleared(_) | Phase::Playing => self.draw_game(canvas, area),
+            Phase::Cleared(_) => {
+                self.draw_game(canvas, area);
+                self.draw_wave(canvas, area);
+            }
+            Phase::Playing => self.draw_game(canvas, area),
         }
     }
 }
@@ -731,8 +920,8 @@ impl Scene for Invaders {
 #[cfg(test)]
 mod tests {
     use super::{
-        BASE_HALF, BUNKER_COLUMNS, BUNKER_ROW, FORMATIONS, Invaders, LIVES, MAX_COLUMNS, MAX_ROWS,
-        MUZZLE_ROW, Phase, Shot,
+        BASE_HALF, BUNKER_COLUMNS, BUNKER_ROW, FORMATIONS, Invaders, LIVES, LIVES_ROW, MAX_COLUMNS,
+        MAX_ROWS, MUZZLE_ROW, Phase, Shot,
     };
     use crate::canvas::{self, Canvas};
     use crate::device::ColorMode;
@@ -798,6 +987,178 @@ mod tests {
     }
 
     #[test]
+    fn a_bomb_beside_a_sheltered_gunner_is_still_a_threat() {
+        // A shelter is one pixel wide and only stops what falls in its own
+        // column; the base is three wide. Asking whether the gunner's column
+        // was sheltered made a bomb one column over read as harmless — and a
+        // bunker column advertise itself as the nearest safe place to stand.
+        let mut game = game();
+        // The outer column of a pair, so the bomb falls on bare floor beside
+        // it rather than onto the other half of the same shelter.
+        let shelter = i32::try_from(BUNKER_COLUMNS[1]).expect("a column");
+        game.cannon = shelter;
+        let beside = shelter + 1;
+        assert!(
+            !game.sheltered(beside),
+            "the test picked a sheltered column"
+        );
+        game.bombs = vec![Shot {
+            x: beside,
+            y: MUZZLE_ROW - 4,
+        }];
+        assert!(
+            game.threat_to(shelter).is_some(),
+            "a bomb that will land on the base was called safe"
+        );
+    }
+
+    #[test]
+    fn a_walk_is_measured_to_the_row_a_bomb_kills_on() {
+        // A bomb kills at the muzzle, a row above the base. Measuring to the
+        // base gave every one of them an extra row — nearly two cannon steps
+        // — and that arithmetic was doing most of the killing.
+        let mut game = game();
+        game.bunkers = [0; canvas::WIDTH as usize];
+        game.cannon = 0;
+        // Placed so the bomb lands during a walk of four columns, but not
+        // during a walk measured one row too generously.
+        let walk = 4;
+        let rows = canvas::floor_pixel(
+            f32::from(u8::try_from(walk).unwrap_or(0)) * super::CANNON_STEP / super::BOMB_STEP,
+        );
+        game.bombs = vec![Shot {
+            x: 2,
+            y: MUZZLE_ROW - rows,
+        }];
+        assert!(
+            !game.reachable(walk),
+            "it set off across a bomb that lands on the way"
+        );
+    }
+
+    #[test]
+    fn the_pips_count_the_lives() {
+        // They used to draw one fewer than there were, so the last life showed
+        // an empty row, and they sat side by side where two lit pixels read as
+        // one bar rather than two pips.
+        let mut game = game();
+        for lives in 1..=LIVES {
+            game.lives = lives;
+            let mut canvas = Canvas::new();
+            game.render(&mut canvas, Area::FULL);
+            let pips = (0..canvas::WIDTH)
+                .filter(|x| canvas.get(*x, LIVES_ROW) > 0)
+                .count();
+            assert_eq!(pips, usize::from(lives), "{lives} lives drew {pips} pips");
+        }
+    }
+
+    #[test]
+    fn a_shot_is_drawn_on_the_row_it_launched_from() {
+        // A bullet crosses a row faster than a frame lasts, so firing before
+        // moving it meant the launch row was never painted: shots appeared
+        // level with the shelters, fused to them one time in seven.
+        let mut game = game();
+        let mut seen = false;
+        for _ in 0..2000 {
+            game.update(Duration::from_millis(33));
+            let Some(bullet) = game.bullet else { continue };
+            if bullet.y != super::LAUNCH_ROW {
+                continue;
+            }
+            let mut canvas = Canvas::new();
+            game.render(&mut canvas, Area::FULL);
+            assert!(
+                canvas.get(bullet.x, super::LAUNCH_ROW) > 0,
+                "a shot on the launch row was not drawn there"
+            );
+            seen = true;
+        }
+        assert!(seen, "no shot was ever caught on its launch row");
+    }
+
+    #[test]
+    fn a_run_gets_harder_than_the_wave_it_started_on() {
+        // Every wave past the fourth used to be pixel for pixel a wave already
+        // played: the only thing that changed with the wave number was capped.
+        let mut game = game();
+        let (chance, bombs, speed) = (game.bomb_chance(), game.bombs_allowed(), game.speed_scale());
+
+        game.wave = 12;
+        assert!(game.bomb_chance() > chance, "the rank bombs no harder");
+        assert!(game.bombs_allowed() > bombs, "the sky never fills");
+        assert!(game.speed_scale() < speed, "the rank never speeds up");
+
+        // And it stops somewhere: a run must end, not become impossible.
+        game.wave = 5000;
+        assert!(game.bombs_allowed() <= super::BOMBS_CEILING);
+        assert!(game.speed_scale() >= super::MIN_SPEED_SCALE);
+        assert!(game.step_interval() > 0.0, "a zero interval would spin");
+    }
+
+    #[test]
+    fn the_wave_is_written_out_between_waves() {
+        // The beat between waves is the only moment the panel has to spare,
+        // and the wave number is the only thing that says where a run has got
+        // to — without it every wave past the fourth looked like one already
+        // played.
+        let mut game = game();
+        for wave in [0, 6, 11, 98] {
+            game.wave = wave;
+            game.phase = Phase::Cleared(0.5);
+            let mut canvas = Canvas::new();
+            game.render(&mut canvas, Area::FULL);
+
+            let label: usize = (super::WAVE_LABEL_ROW
+                ..super::WAVE_LABEL_ROW + crate::font::GLYPH_HEIGHT)
+                .flat_map(|y| (0..canvas::WIDTH).map(move |x| (x, y)))
+                .filter(|(x, y)| canvas.get(*x, *y) > 0)
+                .count();
+            assert!(label > 0, "wave {wave} was not written out");
+
+            // And it keeps clear of the shelters underneath it.
+            for x in 0..canvas::WIDTH {
+                let sheltered = game.sheltered(x);
+                assert_eq!(
+                    canvas.get(x, BUNKER_ROW) > 0,
+                    sheltered,
+                    "the label spilled onto the shelter row at {x}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_lost_life_is_a_local_event_and_a_lost_run_is_not() {
+        // A life goes every couple of minutes, and it used to fire the same
+        // full-panel strobe as the end of a run — the brightest thing the
+        // panel does, under someone's hands, carrying one unreadable bit.
+        let lit = |phase| {
+            let mut game = game();
+            game.cannon = 4;
+            game.phase = phase;
+            let mut canvas = Canvas::new();
+            game.render(&mut canvas, Area::FULL);
+            (0..canvas::HEIGHT)
+                .flat_map(|y| (0..canvas::WIDTH).map(move |x| (x, y)))
+                .filter(|(x, y)| canvas.get(*x, *y) > 0)
+                .count()
+        };
+
+        let life = lit(Phase::LostLife(super::LOST_LIFE_DELAY - 0.6));
+        let whole = usize::try_from(canvas::WIDTH * canvas::HEIGHT).expect("a panel");
+        assert!(
+            life < whole / 4,
+            "losing a life lit {life} of {whole} pixels"
+        );
+        assert_eq!(
+            lit(Phase::LostRun(super::LOST_RUN_DELAY)),
+            whole,
+            "losing a run should still take the whole panel"
+        );
+    }
+
+    #[test]
     fn every_formation_has_room_to_march() {
         // A rank as wide as the panel bounces off a wall every other step and
         // descends with it, so it lands on the gunner whatever anyone does.
@@ -854,20 +1215,33 @@ mod tests {
     }
 
     #[test]
-    fn nothing_is_drawn_outside_the_area() {
+    fn the_scene_demands_the_whole_panel_and_keeps_its_guard_row() {
+        // What was here asked about the rows outside a full-panel area, of
+        // which there are none: the loop body never ran and it passed on
+        // nothing for its whole life. This scene writes every row it draws as
+        // an absolute constant, so the contract worth asserting is that it can
+        // never be handed less than the panel — and that the one row it
+        // promises to leave dark stays dark.
+        assert_eq!(
+            game().min_height(),
+            canvas::HEIGHT,
+            "a scene drawing in absolute rows must ask for all of them"
+        );
+
         let mut game = game();
-        play(&mut game, 4.0);
-        let area = Area {
-            top: 0,
-            height: canvas::HEIGHT,
-        };
-        let mut canvas = Canvas::new();
-        game.render(&mut canvas, area);
-        for y in 0..canvas::HEIGHT {
-            if y < area.top || y >= area.top + area.height {
-                for x in 0..canvas::WIDTH {
-                    assert_eq!(canvas.get(x, y), 0, "drew at {x},{y}");
-                }
+        for _ in 0..400 {
+            play(&mut game, 0.3);
+            let mut canvas = Canvas::new();
+            game.render(&mut canvas, Area::FULL);
+            if matches!(game.phase, Phase::LostLife(_) | Phase::LostRun(_)) {
+                continue;
+            }
+            for x in 0..canvas::WIDTH {
+                assert_eq!(
+                    canvas.get(x, LIVES_ROW + 1),
+                    0,
+                    "the guard row under the pips was drawn on at {x}"
+                );
             }
         }
     }
@@ -1012,7 +1386,10 @@ mod tests {
         // it does once only a few aliens are left.
         for survivors in [12, 3, 1] {
             let mut game = game();
-            let mut left = MAX_ROWS * MAX_COLUMNS;
+            // The living count, not the size of the array: seeding this with
+            // the array meant the twelve-alien case really tested nine, and
+            // the full rank — longest flight, longest lead — went unexercised.
+            let mut left = game.remaining();
             for row in 0..MAX_ROWS {
                 for column in 0..MAX_COLUMNS {
                     if game.alive[row][column] && left > survivors {
@@ -1037,6 +1414,40 @@ mod tests {
                 "with {survivors} left, the shot was led to {predicted} and the alien was at {actual}"
             );
         }
+    }
+
+    #[test]
+    fn the_gunner_and_its_own_shot_never_touch() {
+        // Both are lone lit pixels and there is no shading to tell them apart,
+        // so a bullet launched right above the muzzle read as one two-pixel
+        // object that then tore itself in half.
+        let mut game = game();
+        game.bunkers = [0; canvas::WIDTH as usize];
+        game.bullet = None;
+        game.alive = [[false; MAX_COLUMNS]; MAX_ROWS];
+        game.rank_x = 4;
+        game.rank_y = 20;
+        game.alive[0][0] = true;
+        // Stand where the shot is led to, so it takes the shot.
+        let (x, y) = game.living().next().expect("one alien");
+        game.cannon = game.predicted_x(x, y);
+        game.maybe_fire();
+
+        let bullet = game.bullet.expect("it did not fire at a lined-up alien");
+        assert!(
+            MUZZLE_ROW - bullet.y >= 2,
+            "the shot appeared at row {}, touching the muzzle at {MUZZLE_ROW}",
+            bullet.y
+        );
+
+        // And the panel agrees: a dark row between them.
+        let mut canvas = Canvas::new();
+        game.render(&mut canvas, Area::FULL);
+        assert_eq!(
+            canvas.get(game.cannon, MUZZLE_ROW - 1),
+            0,
+            "the gap between the gunner and its shot was drawn over"
+        );
     }
 
     #[test]
