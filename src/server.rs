@@ -379,10 +379,10 @@ mod tests {
         let mut drawn = Canvas::new();
         drawn.set(4, 17, 0xC3);
 
-        if let Some(mirror) = control.mirrors.get(&PanelName::Left) {
-            if let Ok(mut slot) = mirror.lock() {
-                slot.clone_from(&drawn);
-            }
+        if let Some(mirror) = control.mirrors.get(&PanelName::Left)
+            && let Ok(mut slot) = mirror.lock()
+        {
+            slot.clone_from(&drawn);
         }
 
         assert_eq!(control.frame(PanelName::Left), Some(drawn));

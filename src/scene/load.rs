@@ -95,10 +95,10 @@ impl Load {
         match self.source {
             Source::Cpu => {
                 if let Some(now) = system::read_cpu() {
-                    if let Some(previous) = self.previous {
-                        if let Some(busy) = now.busy_since(previous) {
-                            self.value = busy;
-                        }
+                    if let Some(previous) = self.previous
+                        && let Some(busy) = now.busy_since(previous)
+                    {
+                        self.value = busy;
                     }
                     self.previous = Some(now);
                 }

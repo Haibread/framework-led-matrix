@@ -197,7 +197,7 @@ pub fn run_panel<M: Matrix, S: Scene>(
         }
 
         frames += 1;
-        if frames % FRAME_LOG_INTERVAL == 0 {
+        if frames.is_multiple_of(FRAME_LOG_INTERVAL) {
             debug!(panel = label, frames, "still rendering");
         }
 
@@ -576,7 +576,7 @@ mod tests {
             }
             // Fail every other frame, forever, without ever failing twice in a
             // row: the panel should keep going regardless.
-            if attempt % 2 == 0 {
+            if attempt.is_multiple_of(2) {
                 Err(anyhow!("Operation timed out"))
             } else {
                 Ok(())

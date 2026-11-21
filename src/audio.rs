@@ -137,10 +137,10 @@ impl Drop for Listener {
         self.stop.store(true, Ordering::Relaxed);
         // The reader is blocked on the pipe, and silence can keep it there for
         // a long time; killing the child is what actually wakes it.
-        if let Ok(mut child) = self.child.lock() {
-            if let Some(running) = child.take() {
-                reap(running);
-            }
+        if let Ok(mut child) = self.child.lock()
+            && let Some(running) = child.take()
+        {
+            reap(running);
         }
     }
 }
@@ -229,10 +229,10 @@ fn capture(
         }
     }
 
-    if let Ok(mut slot) = holder.lock() {
-        if let Some(running) = slot.take() {
-            reap(running);
-        }
+    if let Ok(mut slot) = holder.lock()
+        && let Some(running) = slot.take()
+    {
+        reap(running);
     }
     Ok(())
 }
