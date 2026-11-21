@@ -41,10 +41,10 @@ impl<T: Clone + Send + 'static> Poller<T> {
         thread::spawn(move || {
             debug!(poller = name, "started");
             while !stopping.load(Ordering::Relaxed) {
-                if let Some(value) = read() {
-                    if let Ok(mut slot) = shared.lock() {
-                        *slot = value;
-                    }
+                if let Some(value) = read()
+                    && let Ok(mut slot) = shared.lock()
+                {
+                    *slot = value;
                 }
                 wait(interval, &stopping);
             }

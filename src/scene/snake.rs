@@ -240,12 +240,11 @@ impl Snake {
             return;
         }
 
-        if !eats {
-            if let Some(tail) = self.body.pop_back() {
-                if let Some(index) = slot(tail) {
-                    self.occupied[index] = false;
-                }
-            }
+        if !eats
+            && let Some(tail) = self.body.pop_back()
+            && let Some(index) = slot(tail)
+        {
+            self.occupied[index] = false;
         }
 
         self.body.push_front(next);
@@ -354,12 +353,11 @@ impl Snake {
         for (index, cell) in path.iter().enumerate() {
             // Only the last cell of the path is the food, so only it grows us.
             let eats = index == path.len() - 1;
-            if !eats {
-                if let Some(tail) = body.pop_back() {
-                    if let Some(slot_index) = slot(tail) {
-                        occupied[slot_index] = false;
-                    }
-                }
+            if !eats
+                && let Some(tail) = body.pop_back()
+                && let Some(slot_index) = slot(tail)
+            {
+                occupied[slot_index] = false;
             }
             body.push_front(*cell);
             if let Some(slot_index) = slot(*cell) {
