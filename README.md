@@ -286,6 +286,8 @@ journalctl --user -u ledmat -f
 
 ## Development
 
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full setup, the hooks and CI.
+
 ```bash
 pre-commit install
 cargo test
