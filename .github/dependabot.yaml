@@ -16,3 +16,17 @@ updates:
       interval: monthly
     commit-message:
       prefix: "deps:"
+
+  - package-ecosystem: rust-toolchain
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "deps:"
+
+  - package-ecosystem: pre-commit
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "ci:"
